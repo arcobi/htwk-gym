@@ -1,9 +1,9 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: true
+  headless: false
   max_iterations: 10000 # set the maximum number of learning iterations to train for
-  sim_device: "cuda:0" # device for physics simulation
-  rl_device: "cuda:0" # device for the RL algorithm
+  sim_device: "cpu" # device for physics simulation
+  rl_device: "cpu" # device for the RL algorithm
   seed: -1 # seed - set to -1 to choose random seed
   description: ""
   enable_csv_logging: false
@@ -18,7 +18,7 @@ locomotion_model:
   num_privileged_obs: 14
 
 env:
-  num_envs: 1024
+  num_envs: 10
   num_observations: 44  # 42 + 2 for ball target velocity commands
   num_privileged_obs: 16
   num_actions: 10
@@ -97,19 +97,18 @@ asset:
                   [-0.1015, -0.05, -0.03]] # x,y,z [m]
 
 ball:
-  file: "resources/T1/ball.urdf"
   name: "ball"
+  radius: 0.075  # Ball radius in meters (from old URDF)
+  mass: 0.2      # Ball mass in kg (from old URDF)
   init_pos: [0.3, 0.0, 0.06]  # Initial position of the ball
   init_rot: [0.0, 0.0, 0.0, 1.0]  # Initial rotation (quaternion)
   init_lin_vel: [0.0, 0.0, 0.0]  # Initial linear velocity
   init_ang_vel: [0.0, 0.0, 0.0]  # Initial angular velocity
   restitution: 0.0  # Bounciness
-  friction: 1  # Friction coefficient
-  rolling_friction: 1  # Rolling friction coefficient
-  contact_offset: 0.005
+  friction: 1.0  # Custom friction coefficient (applied manually)
+  rolling_friction: 1.0  # Custom rolling friction coefficient (applied manually)
   density: 0.001
-  thickness: 0.01
-  spawn_radius: 2  # Maximum distance from robot to place the ball at reset
+  spawn_radius: 1  # Maximum distance from robot to place the ball at reset
 
 init_state:
   pos: [0.0, 0.0, 0.72] # x,y,z [m]

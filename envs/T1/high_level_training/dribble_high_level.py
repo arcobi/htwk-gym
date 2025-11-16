@@ -79,11 +79,12 @@ class DribbleHighLevel(BaseTask):
         robot_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
         self.robot_body_names = self.gym.get_asset_rigid_body_names(robot_asset)
 
-        # Load ball asset
+        # Create ball asset directly as sphere (no URDF)
         ball_cfg = self.cfg["ball"]
-        ball_root = os.path.dirname(ball_cfg["file"])
-        ball_file = os.path.basename(ball_cfg["file"])
+        self.ball_radius = ball_cfg.get("radius", 0.075)  # Default from old URDF
+        self.ball_mass = ball_cfg.get("mass", 0.2)  # Default from old URDF
         
+        # Create sphere asset directly
         ball_asset_options = gymapi.AssetOptions()
         ball_asset_options.density = ball_cfg["density"]
         ball_asset_options.angular_damping = 0.0
@@ -91,13 +92,12 @@ class DribbleHighLevel(BaseTask):
         ball_asset_options.max_angular_velocity = 1000.0
         ball_asset_options.max_linear_velocity = 1000.0
         ball_asset_options.disable_gravity = False
-        ball_asset_options.replace_cylinder_with_capsule = False
-        ball_asset_options.thickness = ball_cfg["thickness"]
         
-        ball_asset = self.gym.load_asset(self.sim, ball_root, ball_file, ball_asset_options)
+        ball_asset = self.gym.create_sphere(self.sim, self.ball_radius, ball_asset_options)
 
-        # Store ball properties
-        self.ball_radius = 0.05  # From URDF
+        # Store ball friction parameters for custom friction implementation
+        self.ball_friction_coef = ball_cfg.get("friction", 1.0)
+        self.ball_rolling_friction_coef = ball_cfg.get("rolling_friction", 1.0)
         self.ball_init_pos = to_torch(ball_cfg["init_pos"], device=self.device)
         self.ball_init_rot = to_torch(ball_cfg["init_rot"], device=self.device)
         self.ball_init_lin_vel = to_torch(ball_cfg["init_lin_vel"], device=self.device)
@@ -197,14 +197,17 @@ class DribbleHighLevel(BaseTask):
 
             ball_handle = self.gym.create_actor(env_handle, ball_asset, ball_pose, ball_cfg["name"], i)
 
+            # Set ball body properties (mass)
             ball_body_props = self.gym.get_actor_rigid_body_properties(env_handle, ball_handle)
+            ball_body_props[0].mass = self.ball_mass
+            self.gym.set_actor_rigid_body_properties(env_handle, ball_handle, ball_body_props)
             
-            # Set ball properties
+            # Set ball shape properties (restitution, but NOT friction - we'll handle that manually)
             ball_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, ball_handle)
             ball_shape_props[0].restitution = ball_cfg["restitution"]
-            ball_shape_props[0].friction = ball_cfg["friction"]
-            ball_shape_props[0].rolling_friction = ball_cfg["rolling_friction"]
-            #ball_shape_props[0].contact_offset = ball_cfg["contact_offset"]
+            # Set friction to 0 in physics engine since we're implementing it manually
+            ball_shape_props[0].friction = 0.0
+            ball_shape_props[0].rolling_friction = 0.0
             self.gym.set_actor_rigid_shape_properties(env_handle, ball_handle, ball_shape_props)
 
             # Store handles
@@ -783,11 +786,16 @@ class DribbleHighLevel(BaseTask):
             dof_torques = torch.clip(dof_torques - friction, min=-self.torque_limits, max=self.torque_limits)
             self.torques += dof_torques
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(dof_torques))
+            
+            # Apply custom ball friction before simulation step
+            self._apply_ball_friction()
+            
             self.gym.simulate(self.sim)
             if self.device == "cpu":
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
             self.gym.refresh_dof_force_tensor(self.sim)
+            self.gym.refresh_rigid_body_state_tensor(self.sim)  # Refresh for ball state in friction calculation
         self.torques /= self.cfg["control"]["decimation"]
         self._draw_ball_target_debug()
         self.render()
@@ -943,6 +951,66 @@ class DribbleHighLevel(BaseTask):
             dim=2,
         )
 
+    def _apply_ball_friction(self):
+        """Apply custom friction forces to the ball"""
+        # Get ball height above ground
+        ball_ground_height = self.ball_pos[:, 2] - self.terrain.terrain_heights(self.ball_pos[:, 0:2])
+        
+        # Check if ball is in contact with ground (within contact threshold)
+        contact_threshold = self.ball_radius + 0.01  # 1cm tolerance
+        is_in_contact = ball_ground_height < contact_threshold
+        
+        # Get ball velocities in world frame
+        ball_lin_vel_world = self.body_states[:, -1, 7:10]  # World frame linear velocity
+        ball_ang_vel_world = self.body_states[:, -1, 10:13]  # World frame angular velocity
+        
+        # Initialize friction forces and torques
+        friction_forces = torch.zeros(self.num_envs, self.num_bodies + 1, 3, dtype=torch.float, device=self.device)
+        friction_torques = torch.zeros(self.num_envs, self.num_bodies + 1, 3, dtype=torch.float, device=self.device)
+        
+        # Apply friction only when ball is in contact with ground
+        if is_in_contact.any():
+            # --- Sliding friction (opposes linear velocity in XY plane) ---
+            ball_vel_xy = ball_lin_vel_world[is_in_contact, 0:2]  # Only XY components
+            ball_speed_xy = torch.norm(ball_vel_xy, dim=-1, keepdim=True)
+            
+            # Avoid division by zero
+            ball_speed_xy = torch.clamp(ball_speed_xy, min=1e-6)
+            
+            # Sliding friction force = -friction_coef * normal_force * velocity_direction
+            # Normal force = mass * gravity (approximation when ball is on ground)
+            gravity_magnitude = 9.81
+            normal_force = self.ball_mass * gravity_magnitude
+            
+            # Friction force magnitude
+            friction_force_magnitude = self.ball_friction_coef * normal_force
+            
+            # Friction force direction (opposite to velocity)
+            friction_direction_xy = -ball_vel_xy / ball_speed_xy
+            friction_force_xy = friction_direction_xy * friction_force_magnitude
+            
+            # Apply friction force to ball (index -1 is the ball body)
+            friction_forces[is_in_contact, -1, 0:2] = friction_force_xy
+            
+            # --- Rolling friction (opposes angular velocity) ---
+            # Rolling friction torque = -rolling_friction_coef * angular_velocity
+            ball_ang_vel = ball_ang_vel_world[is_in_contact]
+            
+            # Rolling friction is proportional to angular velocity
+            rolling_friction_factor = self.ball_rolling_friction_coef * normal_force * self.ball_radius
+            rolling_friction_torque = -rolling_friction_factor * ball_ang_vel
+            
+            # Apply rolling friction torque to ball
+            friction_torques[is_in_contact, -1, :] = rolling_friction_torque
+        
+        # Apply the friction forces and torques to the simulation
+        self.gym.apply_rigid_body_force_tensors(
+            self.sim,
+            gymtorch.unwrap_tensor(friction_forces),
+            gymtorch.unwrap_tensor(friction_torques),
+            gymapi.LOCAL_SPACE,
+        )
+    
     def _check_termination(self):
         """Check if environments need to be reset"""
         self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0, dim=1)
