@@ -25,12 +25,12 @@ env:
   env_spacing: 5.  # not used with plane terrain
 
 runner:
-  horizon_length: 520
+  horizon_length: 25
   mini_epochs: 50
   save_interval: 100
   use_wandb: true
-  log_video_interval: 5  # Log video to wandb every N iterations (defaults to save_interval if not specified)
-  log_video_duration: 30.  # Duration of video clip in seconds
+  log_video_interval: 1  # Log video to wandb every N iterations (defaults to save_interval if not specified)
+  log_video_duration: 2.  # Duration of video clip in seconds
 
 viewer:
   pos: [3., -3., 2.]  # [m]

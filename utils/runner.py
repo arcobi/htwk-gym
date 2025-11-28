@@ -447,6 +447,9 @@ class Runner:
         
         # Capture frames by running the environment
         frames_captured = 0
+
+        total_reward = []
+        seperated_reward = {}
         
         while frames_captured < num_frames:
             # Step the environment with current policy first
@@ -457,6 +460,13 @@ class Runner:
             obs, rew, done, infos = self.env.step(act)
             obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
             privileged_obs = infos["privileged_obs"].to(self.device)
+
+            # Store rewards for the first environment only
+            total_reward.append(rew[0].item())
+            for key, value in infos["rew_terms"].items():
+                if key not in seperated_reward:
+                    seperated_reward[key] = []
+                seperated_reward[key].append(value[0].item())
             
             # step() already calls render() internally which captures frames
             # But we ensure render is called to capture the frame
@@ -478,6 +488,9 @@ class Runner:
             self.recorder.log_video(self.env.camera_frames, it, self.env.dt)
             # Clear frames to free memory
             self.env.camera_frames = []
+        
+        # Log video rewards
+        self.recorder.log_video_rewards(total_reward, seperated_reward, it)
         
         return obs, privileged_obs
 
