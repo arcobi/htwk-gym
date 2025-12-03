@@ -7,7 +7,7 @@ basic:
   seed: 42 # seed - set to -1 to choose random seed
   description: ""
   debug_feet_offset: false # enable debug print for feet_x_offset in play mode
-  task: "K1/ParameterWalk"
+  task: "K1/ParameterWalkK1"
 
 env:
   num_envs: 1
@@ -121,7 +121,7 @@ commands:
   lin_vel_x: [-1.0, 1.0] # min max [m/s]
   lin_vel_y: [-1.0, 1.0] # min max [m/s]
   ang_vel_yaw: [-1.6, 1.6]   # min max [rad/s]
-  gait_frequency: [1.5, 2.4] # min max [Hz]
+  gait_frequency: [1.5, 1.5] # min max [Hz]
   
   # Additional parameters for foot and body control
   foot_yaw_L:         [-0.7,  0.7]     # [rad]

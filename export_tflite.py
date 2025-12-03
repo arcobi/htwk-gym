@@ -13,7 +13,7 @@ import numpy as np
 import torch, onnx
 from onnx_tf.backend import prepare
 import tensorflow as tf
-from utils.model_thomas import ActorCritic          # <-- changed to use Thomas model with odometry
+from utils.model import ActorCritic          # <-- changed to use Thomas model with odometry
 
 def get_robot_type(task_name):
     """Determine robot type from task name."""

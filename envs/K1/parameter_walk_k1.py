@@ -23,7 +23,7 @@ from envs.base_task import BaseTask
 from utils.utils import apply_randomization
 
 
-class ParameterWalk(BaseTask):
+class ParameterWalkK1(BaseTask):
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -706,9 +706,16 @@ class ParameterWalk(BaseTask):
             ],
             device=self.device,
         )
-        self.commands = torch.zeros(self.num_envs, self.cfg["commands"]["num_commands"], dtype=torch.float, device=self.device)
-        self.commands[:, 0] = 0.5
-        self.gait_frequency = 1.9
+        self.commands[:, 0] = 0.2
+        self.commands[:, 1] = 0
+        self.commands[:, 2] = 0
+        self.commands[:, 3] = 1.5
+        self.commands[:, 4] = 0
+        self.commands[:, 5] = 0
+        self.commands[:, 6] = 0
+        self.commands[:, 7] = 0
+        self.commands[:, 8] = 0
+        self.commands[:, 9] = 0
         self.obs_buf = torch.cat(
             (
                 apply_randomization(self.projected_gravity, self.cfg["noise"].get("gravity")) * self.cfg["normalization"]["gravity"],
