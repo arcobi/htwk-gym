@@ -7,6 +7,8 @@ import random
 import time
 import signal
 import imageio
+import subprocess
+import sys
 
 # Import envs first to initialize isaacgym modules
 from envs import *
@@ -177,6 +179,12 @@ class Runner:
         parser.add_argument("--seed", type=int, help="Random seed. Overrides config file if provided.")
         parser.add_argument("--max_iterations", type=int, help="Maximum number of training iterations. Overrides config file if provided.")
         parser.add_argument("--model", type=str, help="Model class name to use (e.g., BaseActorCritic, OdometryActorCritic). Overrides config file if provided.")
+        # Video recording mode arguments (for separate process recording)
+        parser.add_argument("--record_video_mode", action="store_true", help="Enable video recording mode (record and exit).")
+        parser.add_argument("--video_duration", type=float, help="Duration of video to record in seconds.")
+        parser.add_argument("--video_iteration", type=int, help="Iteration number for wandb logging.")
+        parser.add_argument("--video_output_path", type=str, help="Path where to save the video file.")
+        parser.add_argument("--rewards_output_path", type=str, help="Path where to save the reward data JSON file.")
         self.args = parser.parse_args()
 
     # Override config file with args if needed
@@ -194,13 +202,8 @@ class Runner:
                 else:
                     self.cfg["basic"][arg] = getattr(self.args, arg)
         if not self.test:
-            # Enable video recording if wandb video logging is enabled
-            use_wandb = self.cfg["runner"].get("use_wandb", False)
-            log_video_interval = self.cfg["runner"].get("log_video_interval", None)
-            if use_wandb and log_video_interval is not None:
-                self.cfg["viewer"]["record_video"] = True
-            else:
-                self.cfg["viewer"]["record_video"] = False
+            # Disable video recording in training process - videos will be recorded in separate process
+            self.cfg["viewer"]["record_video"] = False
 
     def _set_seed(self):
         if self.cfg["basic"]["seed"] == -1:
@@ -271,12 +274,38 @@ class Runner:
             should_log_video = (use_wandb and 
                                log_video_interval is not None and 
                                log_video_interval > 0 and
-                               (it + 1) % log_video_interval == 0 and
-                               self.cfg["viewer"]["record_video"])
+                               (it + 1) % log_video_interval == 0)
+            
+            # Save checkpoint if needed (for video recording or regular save interval)
+            should_save = False
+            checkpoint_path = None
+            if (it + 1) % self.cfg["runner"]["save_interval"] == 0:
+                should_save = True
+                checkpoint_path = os.path.join(self.recorder.model_dir, f"model_{it + 1}.pth")
+                self.recorder.save(
+                    {
+                        "model": self.model.state_dict(),
+                        "optimizer": self.optimizer.state_dict(),
+                        "curriculum": self.env.curriculum_prob,
+                    },
+                    it + 1,
+                )
             
             if should_log_video:
-                # Capture video frames (this will update obs and privileged_obs)
-                obs, privileged_obs = self._capture_training_video(log_video_duration, it, obs, privileged_obs)
+                # If we didn't save yet, save checkpoint now for video recording
+                if not should_save:
+                    checkpoint_path = os.path.join(self.recorder.model_dir, f"model_{it + 1}.pth")
+                    self.recorder.save(
+                        {
+                            "model": self.model.state_dict(),
+                            "optimizer": self.optimizer.state_dict(),
+                            "curriculum": self.env.curriculum_prob,
+                        },
+                        it + 1,
+                    )
+                # Spawn separate process to record video (will wait for completion)
+                # Note: Video will be uploaded at step it+1 (after training loop logs at step it)
+                self._spawn_video_recording_process(checkpoint_path, it, log_video_duration)
             # within horizon_length, env.step() is called with same act
             for n in range(self.cfg["runner"]["horizon_length"]):
                 self.buffer.update_data("obses", n, obs)
@@ -378,18 +407,15 @@ class Runner:
                 it,
             )
 
-            if (it + 1) % self.cfg["runner"]["save_interval"] == 0:
-                self.recorder.save(
-                    {
-                        "model": self.model.state_dict(),
-                        "optimizer": self.optimizer.state_dict(),
-                        "curriculum": self.env.curriculum_prob,
-                    },
-                    it + 1,
-                )
             print("epoch: {}/{}".format(it + 1, self.cfg["basic"]["max_iterations"]))
 
     def play(self):
+        # Check if we're in record-and-exit mode (for separate process video recording)
+        if self.args.record_video_mode:
+            self._play_record_and_exit()
+            return
+        
+        # Normal play mode (for manual testing)
         obs, infos = self.env.reset()
         obs = obs.to(self.device)
         if self.cfg["viewer"]["record_video"]:
@@ -414,6 +440,128 @@ class Runner:
                     if self.interrupt:
                         raise KeyboardInterrupt
                     signal.signal(signal.SIGINT, signal.default_int_handler)
+    
+    def _play_record_and_exit(self):
+        """Record video for a specified duration and save to file, then exit.
+        This is used by the separate process spawned during training.
+        The main process will upload the video to wandb after this process finishes."""
+        # Enable video recording
+        self.cfg["viewer"]["record_video"] = True
+        
+        # Get video duration
+        video_duration = self.args.video_duration
+        if video_duration is None:
+            video_duration = self.cfg["runner"].get("log_video_duration", 10.0)
+        
+        # Get output path for video file
+        video_output_path = self.args.video_output_path
+        if video_output_path is None:
+            print("Error: video_output_path not provided")
+            return
+        
+        # Calculate number of frames to capture
+        num_frames = int(video_duration / self.env.dt)
+        
+        # Clear existing frames
+        if hasattr(self.env, 'camera_frames'):
+            self.env.camera_frames = []
+        
+        # Initialize environment
+        obs, infos = self.env.reset()
+        obs = obs.to(self.device)
+        
+        # Ensure camera is initialized
+        if self.cfg["viewer"]["record_video"]:
+            self.env.gym.refresh_actor_root_state_tensor(self.env.sim)
+            self.env.render()
+        
+        # Capture frames
+        frames_captured = 0
+        total_reward = []
+        separated_reward = {}
+        
+        print(f"Recording video for {video_duration} seconds ({num_frames} frames)...")
+        
+        while frames_captured < num_frames:
+            # Step the environment with current policy
+            with torch.no_grad():
+                dist = self.model.act(obs)
+                act = dist.sample()
+            
+            obs, rew, done, infos = self.env.step(act)
+            obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
+            
+            # Store rewards for the first environment only
+            total_reward.append(rew[0].item())
+            for key, value in infos["rew_terms"].items():
+                if key not in separated_reward:
+                    separated_reward[key] = []
+                separated_reward[key].append(value[0].item())
+            
+            # Render to capture frame
+            if self.cfg["viewer"]["record_video"]:
+                self.env.render()
+            
+            frames_captured += 1
+            
+            # Reset if episode done
+            if done[0]:
+                reset_obs, reset_infos = self.env.reset()
+                obs = reset_obs.to(self.device)
+        
+        # Save video to file
+        if hasattr(self.env, 'camera_frames') and len(self.env.camera_frames) > 0:
+            import numpy as np
+            import imageio
+            
+            # Convert frames to RGB format
+            video_frames = []
+            for frame in self.env.camera_frames:
+                if len(frame.shape) == 3:
+                    if frame.shape[2] == 4:
+                        # BGRA to RGB
+                        rgb_frame = frame[:, :, [2, 1, 0]]
+                    elif frame.shape[2] == 3:
+                        rgb_frame = frame
+                    else:
+                        rgb_frame = frame[:, :, :3]
+                else:
+                    continue
+                
+                # Ensure uint8 format
+                if rgb_frame.dtype != np.uint8:
+                    if rgb_frame.max() <= 1.0:
+                        rgb_frame = (rgb_frame * 255).astype(np.uint8)
+                    else:
+                        rgb_frame = np.clip(rgb_frame, 0, 255).astype(np.uint8)
+                
+                video_frames.append(rgb_frame)
+            
+            # Save video file
+            os.makedirs(os.path.dirname(video_output_path), exist_ok=True)
+            fps = int(1.0 / self.env.dt)
+            imageio.mimwrite(video_output_path, video_frames, fps=fps, codec='libx264')
+            print(f"Video saved to {video_output_path}")
+        else:
+            print("Warning: No frames captured")
+        
+        # Save reward data to JSON file
+        if self.args.rewards_output_path and len(total_reward) > 0:
+            import json
+            os.makedirs(os.path.dirname(self.args.rewards_output_path), exist_ok=True)
+            reward_data = {
+                "total_reward": total_reward,
+                "separated_reward": separated_reward
+            }
+            with open(self.args.rewards_output_path, 'w') as f:
+                json.dump(reward_data, f)
+            print(f"Reward data saved to {self.args.rewards_output_path}")
+        
+        # Clean up
+        if hasattr(self.env, 'camera_frames'):
+            self.env.camera_frames = []
+        
+        print("Video recording complete. Exiting...")
 
     def interrupt_handler(self, signal, frame):
         print("\nInterrupt received, waiting for video to finish...")
@@ -504,3 +652,238 @@ class Runner:
         else:
             # Default fallback - could be extended for other robot types
             return "Unknown"
+    
+    def _upload_video_to_wandb(self, video_path, iteration):
+        """Upload a video file to wandb.
+        
+        Args:
+            video_path: Path to the video file
+            iteration: Iteration number for logging
+        """
+        if not self.cfg["runner"].get("use_wandb", False):
+            return
+        
+        import wandb
+        if wandb.run is None:
+            print("Warning: wandb run not initialized, cannot upload video")
+            return
+        
+        try:
+            # Use custom step metric for video logs to avoid step conflicts
+            # See: https://docs.wandb.ai/models/track/log/customize-logging-axes
+            # The iteration parameter is already it+1 (passed from spawn function)
+            wandb.log({
+                "video/iteration": iteration,  # Custom x-axis metric
+                "video/training": wandb.Video(video_path, format="mp4")
+            }, commit=True)
+            print(f"Video uploaded to wandb at iteration {iteration}")
+        except Exception as e:
+            print(f"Error uploading video to wandb: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _upload_rewards_to_wandb(self, rewards_path, iteration):
+        """Load reward data from file and upload plots to wandb.
+        
+        Args:
+            rewards_path: Path to the JSON file containing reward data
+            iteration: Iteration number for logging
+        """
+        if not self.cfg["runner"].get("use_wandb", False):
+            return
+        
+        import wandb
+        import json
+        import numpy as np
+        import matplotlib
+        matplotlib.use('Agg')
+        import matplotlib.pyplot as plt
+        
+        if wandb.run is None:
+            print("Warning: wandb run not initialized, cannot upload rewards")
+            return
+        
+        try:
+            # Load reward data
+            with open(rewards_path, 'r') as f:
+                reward_data = json.load(f)
+            
+            total_reward = reward_data["total_reward"]
+            separated_reward = reward_data["separated_reward"]
+            
+            if len(total_reward) == 0:
+                print("Warning: No reward data to log")
+                return
+            
+            # Use custom step metric for video logs to avoid step conflicts
+            # See: https://docs.wandb.ai/models/track/log/customize-logging-axes
+            # The iteration parameter is already it+1 (passed from spawn function)
+            
+            # Convert to numpy arrays
+            total_reward_np = np.array(total_reward)
+            timesteps = np.arange(len(total_reward_np))
+            
+            # Calculate statistics
+            mean_total_reward = float(np.mean(total_reward_np))
+            sum_total_reward = float(np.sum(total_reward_np))
+            
+            # Log summary statistics
+            self.recorder.writer.add_scalar("video/mean_reward", mean_total_reward, iteration)
+            self.recorder.writer.add_scalar("video/sum_reward", sum_total_reward, iteration)
+            
+            # Prepare log dictionary with custom step metric
+            log_dict = {
+                "video/iteration": iteration,  # Custom x-axis metric
+                "video/mean_reward": mean_total_reward,
+                "video/sum_reward": sum_total_reward,
+            }
+            
+            # Create and log figure for total reward
+            fig_total = plt.figure(figsize=(12, 4))
+            plt.plot(timesteps, total_reward_np, linewidth=2, color='blue')
+            plt.title(f'Total Reward (Mean: {mean_total_reward:.3f}, Sum: {sum_total_reward:.3f})', fontsize=12, fontweight='bold')
+            plt.xlabel('Frame')
+            plt.ylabel('Reward')
+            plt.grid(True, alpha=0.3)
+            plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+            plt.tight_layout()
+            log_dict["video_plots/total_reward_trajectory"] = wandb.Image(fig_total)
+            plt.close(fig_total)
+            
+            # Create and log figure for each reward term
+            for key, values in separated_reward.items():
+                if len(values) == 0:
+                    continue
+                
+                values_np = np.array(values)
+                mean_value = float(np.mean(values_np))
+                sum_value = float(np.sum(values_np))
+                
+                # Create figure for this reward term
+                fig_term = plt.figure(figsize=(12, 4))
+                plt.plot(timesteps, values_np, linewidth=2)
+                plt.title(f'{key} (Mean: {mean_value:.3f}, Sum: {sum_value:.3f})', fontsize=12)
+                plt.xlabel('Frame')
+                plt.ylabel('Reward')
+                plt.grid(True, alpha=0.3)
+                plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
+                plt.tight_layout()
+                log_dict[f"video_plots/reward_trajectories/{key}"] = wandb.Image(fig_term)
+                plt.close(fig_term)
+            
+            # Log everything at once with custom step metric
+            wandb.log(log_dict, commit=True)
+            print(f"Reward plots uploaded to wandb at iteration {iteration}")
+        except Exception as e:
+            print(f"Error uploading rewards to wandb: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    def _spawn_video_recording_process(self, checkpoint_path, iteration, video_duration):
+        """Spawn a separate process to record video and save to file.
+        The main process will upload the video to wandb after the process finishes.
+        
+        Args:
+            checkpoint_path: Path to the checkpoint file to load
+            iteration: Current iteration number for wandb logging
+            video_duration: Duration of video to record in seconds
+        """
+        if not self.cfg["runner"].get("use_wandb", False):
+            return
+        
+        # Create video output path
+        video_dir = os.path.join(self.recorder.dir, "videos")
+        os.makedirs(video_dir, exist_ok=True)
+        video_output_path = os.path.join(video_dir, f"video_iter_{iteration + 1}.mp4")
+        rewards_output_path = os.path.join(video_dir, f"rewards_iter_{iteration + 1}.json")
+        
+        # Build command to run play.py in record mode
+        play_script = os.path.join(os.path.dirname(os.path.dirname(__file__)), "play.py")
+        cmd = [
+            sys.executable,
+            play_script,
+            "--task", self.cfg["basic"]["task"],
+            "--checkpoint", checkpoint_path,
+            "--record_video_mode",
+            "--video_duration", str(video_duration),
+            "--video_iteration", str(iteration + 1),
+            "--video_output_path", video_output_path,
+            "--rewards_output_path", rewards_output_path,
+        ]
+        
+        # Add other relevant arguments if they were provided
+        if self.args.num_envs is not None:
+            cmd.extend(["--num_envs", str(self.args.num_envs)])
+        # Use headless from config for video recording (usually better for separate process)
+        if self.cfg["basic"].get("headless") is not None:
+            cmd.extend(["--headless", str(self.cfg["basic"]["headless"])])
+        elif self.args.headless is not None:
+            cmd.extend(["--headless", str(self.args.headless)])
+        if self.args.sim_device is not None:
+            cmd.extend(["--sim_device", self.args.sim_device])
+        if self.args.rl_device is not None:
+            cmd.extend(["--rl_device", self.args.rl_device])
+        if self.args.seed is not None:
+            cmd.extend(["--seed", str(self.args.seed)])
+        if self.args.model is not None:
+            cmd.extend(["--model", self.args.model])
+        
+        print(f"Spawning video recording process for iteration {iteration + 1}...")
+        print(f"Command: {' '.join(cmd)}")
+        
+        # Verify checkpoint file exists
+        if not os.path.exists(checkpoint_path):
+            print(f"Error: Checkpoint file {checkpoint_path} does not exist")
+            return
+        
+        # Spawn process with environment variables
+        env = os.environ.copy()
+        # Ensure PYTHONPATH is set correctly
+        if 'PYTHONPATH' not in env:
+            env['PYTHONPATH'] = os.path.dirname(os.path.dirname(__file__))
+        else:
+            env['PYTHONPATH'] = os.path.dirname(os.path.dirname(__file__)) + os.pathsep + env['PYTHONPATH']
+        
+        # Create log files for the subprocess
+        log_dir = os.path.join(self.recorder.dir, "video_logs")
+        os.makedirs(log_dir, exist_ok=True)
+        stdout_file = os.path.join(log_dir, f"video_iter_{iteration + 1}_stdout.log")
+        stderr_file = os.path.join(log_dir, f"video_iter_{iteration + 1}_stderr.log")
+        
+        try:
+            with open(stdout_file, 'w') as fout, open(stderr_file, 'w') as ferr:
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=fout,
+                    stderr=ferr,
+                    env=env,
+                )
+            
+            print(f"Video recording process started (PID: {process.pid})")
+            print(f"  Logs: {stdout_file} and {stderr_file}")
+            print(f"  Waiting for video recording to complete...")
+            
+            # Wait for the process to complete
+            return_code = process.wait()
+            
+            if return_code == 0:
+                print(f"Video recording completed successfully for iteration {iteration + 1}")
+                # Upload video and rewards to wandb
+                if os.path.exists(video_output_path):
+                    self._upload_video_to_wandb(video_output_path, iteration + 1)
+                else:
+                    print(f"Warning: Video file not found at {video_output_path}")
+                
+                # Load and log reward data
+                if os.path.exists(rewards_output_path):
+                    self._upload_rewards_to_wandb(rewards_output_path, iteration + 1)
+                else:
+                    print(f"Warning: Reward data file not found at {rewards_output_path}")
+            else:
+                print(f"Warning: Video recording process exited with code {return_code}")
+                print(f"  Check logs: {stdout_file} and {stderr_file}")
+                
+        except Exception as e:
+            print(f"Error spawning video recording process: {e}")
+            import traceback
+            traceback.print_exc()

@@ -11,7 +11,7 @@ import matplotlib.pyplot as plt
 
 class Recorder:
 
-    def __init__(self, cfg):
+    def __init__(self, cfg, skip_wandb_init=False):
         self.cfg = cfg
         name = time.strftime("%Y-%m-%d-%H-%M-%S", time.localtime())
         # Create logs in robot-type/task-name hierarchy
@@ -28,7 +28,7 @@ class Recorder:
         self.model_dir = os.path.join(self.dir, "nn")
         os.mkdir(self.model_dir)
         self.writer = SummaryWriter(os.path.join(self.dir, "summaries"))
-        if self.cfg["runner"]["use_wandb"]:
+        if self.cfg["runner"]["use_wandb"] and not skip_wandb_init:
             # Sanitize project name for wandb (remove invalid characters)
             project_name = self._sanitize_project_name(self.cfg["basic"]["task"])
             wandb.init(
@@ -38,6 +38,11 @@ class Recorder:
                 notes=self.cfg["basic"]["description"],
                 config=self.cfg,
             )
+            # Define custom step metric for video logs to avoid step conflicts
+            # See: https://docs.wandb.ai/models/track/log/customize-logging-axes
+            wandb.define_metric("video/iteration", step_metric="video/iteration")
+            wandb.define_metric("video/*", step_metric="video/iteration")
+            wandb.define_metric("video_plots/*", step_metric="video/iteration")
 
         self.episode_statistics = {}
         self.last_episode = {}
@@ -46,6 +51,63 @@ class Recorder:
 
         with open(os.path.join(self.dir, "config.yaml"), "w") as file:
             yaml.dump(self.cfg, file)
+    
+    def resume_wandb_run(self, run_id, project, run_name, wandb_dir):
+        """Resume an existing wandb run for logging in a separate process.
+        
+        Uses shared mode to allow logging from multiple processes to the same run.
+        See: https://docs.wandb.ai/models/track/log/distributed-training#track-all-processes-to-a-single-run
+        
+        Args:
+            run_id: The wandb run ID to resume
+            project: The wandb project name
+            run_name: The wandb run name
+            wandb_dir: The wandb directory path (should be the parent directory, not the run files dir)
+        """
+        if not self.cfg["runner"]["use_wandb"]:
+            print("Warning: wandb is disabled in config, cannot resume run")
+            return
+        
+        # Terminate any existing wandb run
+        if wandb.run is not None:
+            print("Finishing existing wandb run...")
+            wandb.finish()
+        
+        # Fix wandb_dir - it should point to the parent directory, not the run files directory
+        # wandb_dir typically ends with /files, we need the parent
+        original_wandb_dir = wandb_dir
+        if wandb_dir.endswith("/files"):
+            wandb_dir = os.path.dirname(wandb_dir)
+        elif "/wandb/run-" in wandb_dir:
+            # Extract the directory before /wandb/
+            wandb_dir = wandb_dir.split("/wandb/")[0]
+        
+        print(f"Resuming wandb run: {run_id} (project: {project})")
+        
+        # Resume the run using shared mode for multi-process logging
+        # This allows logging from a separate process while the main process is also logging
+        # See: https://docs.wandb.ai/models/track/log/distributed-training#track-all-processes-to-a-single-run
+        try:
+            wandb.init(
+                project=project,
+                id=run_id,
+                name=run_name,
+                dir=wandb_dir,
+                settings=wandb.Settings(
+                    mode="shared",  # Enable shared mode for multi-process logging
+                    x_label="video_recorder",  # Label to identify this process in logs
+                    x_primary=False,  # This is a worker process, not the primary
+                    init_timeout=120,  # Increase timeout to 120 seconds
+                ),
+            )
+            print(f"Wandb run resumed successfully!")
+            print(f"  Run ID: {wandb.run.id if wandb.run else 'None'}")
+            print(f"  Run URL: {wandb.run.url if wandb.run else 'None'}")
+        except Exception as e:
+            print(f"Error resuming wandb run: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     def _sanitize_project_name(self, task_name):
         """Sanitize task name for wandb project name by removing invalid characters."""
@@ -136,21 +198,17 @@ class Recorder:
             if len(frame.shape) == 3:
                 if frame.shape[2] == 4:
                     # Isaac Gym returns BGRA format, convert to RGB
-                    # Take BGR channels and reverse to RGB: [B, G, R, A] -> [R, G, B]
                     rgb_frame = frame[:, :, [2, 1, 0]]  # BGR -> RGB
                 elif frame.shape[2] == 3:
                     rgb_frame = frame
                 else:
-                    # Unexpected format, try to take first 3 channels
                     rgb_frame = frame[:, :, :3]
             elif len(frame.shape) == 2:
                 # Grayscale, convert to RGB by repeating channels
                 rgb_frame = np.stack([frame, frame, frame], axis=2)
             else:
                 # Try to reshape if it's a flattened image
-                # Assuming it's (height*width*4,) or similar
                 if frame.size % 4 == 0:
-                    # Try to reshape as RGBA
                     h = int(np.sqrt(frame.size // 4))
                     w = frame.size // (4 * h)
                     frame_reshaped = frame.reshape(h, w, 4)
@@ -160,7 +218,6 @@ class Recorder:
             
             # Ensure uint8 format (0-255 range)
             if rgb_frame.dtype != np.uint8:
-                # Handle float values in [0, 1] range
                 if rgb_frame.max() <= 1.0:
                     rgb_frame = (rgb_frame * 255).astype(np.uint8)
                 else:
@@ -174,16 +231,28 @@ class Recorder:
         
         # Stack frames: (time, height, width, channels)
         video_tensor = np.stack(video_array, axis=0)
-
-        # wandb.Video expects (time, channels, width, height) format
-        # Transpose from (time, height, width, channels) to (time, channels, width, height)
+        # wandb.Video expects (time, channels, height, width) format
         video_tensor = np.transpose(video_tensor, (0, 3, 1, 2))
         
-        # Calculate FPS from simulation timestep (same as in play mode)
+        # Calculate FPS from simulation timestep
         fps = int(1.0 / dt)
         
         # Log to wandb
-        wandb.log({"video/training": wandb.Video(video_tensor, fps=fps, format="mp4")}, step=it)
+        if wandb.run is None:
+            print("Error: wandb.run is None, cannot log video")
+            return
+        
+        # Get current step and ensure we log at a step >= current step
+        current_step = wandb.run.step
+        log_step = max(it, current_step)
+        
+        try:
+            wandb.log({"video/training": wandb.Video(video_tensor, fps=fps, format="mp4")}, step=log_step, commit=True)
+            print(f"Video logged to wandb at step {log_step} (iteration {it})")
+        except Exception as e:
+            print(f"Error logging video to wandb: {e}")
+            import traceback
+            traceback.print_exc()
 
     def log_video_rewards(self, total_reward, separated_reward, it):
         """Log rewards collected during video capture as time-series graphs.
@@ -202,12 +271,16 @@ class Recorder:
         if not self.cfg["runner"]["use_wandb"]:
             print(f"Warning: wandb is disabled, skipping reward trajectory logging")
             return
-            
         
-        # Convert total reward to numpy array (should already be list of floats)
+        # Get current step and ensure we log at a step >= current step
+        if wandb.run is not None:
+            current_step = wandb.run.step
+            log_step = max(it, current_step)
+        else:
+            log_step = it
+        
+        # Convert total reward to numpy array
         total_reward_np = np.array(total_reward)
-        
-        print(f"Logging video rewards at iteration {it}: {len(total_reward_np)} frames, {len(separated_reward)} reward terms")
         
         # Calculate statistics for total reward
         mean_total_reward = float(np.mean(total_reward_np))
@@ -231,8 +304,7 @@ class Recorder:
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
             plt.tight_layout()
-            wandb.log({"video_plots/total_reward_trajectory": wandb.Image(fig_total)}, step=it)
-            print(f"Logged total reward trajectory at iteration {it}")
+            wandb.log({"video_plots/total_reward_trajectory": wandb.Image(fig_total)}, step=log_step)
             plt.close(fig_total)
             
             # Create and log figure for each reward term
@@ -253,7 +325,7 @@ class Recorder:
                 plt.grid(True, alpha=0.3)
                 plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
                 plt.tight_layout()
-                wandb.log({f"video_plots/reward_trajectories/{key}": wandb.Image(fig_term)}, step=it)
+                wandb.log({f"video_plots/reward_trajectories/{key}": wandb.Image(fig_term)}, step=log_step)
                 plt.close(fig_term)
             
             
