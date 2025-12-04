@@ -4,6 +4,9 @@ import os
 import time
 import wandb
 import yaml
+import numpy as np
+import matplotlib
+import matplotlib.pyplot as plt
 
 
 class Recorder:
@@ -190,6 +193,8 @@ class Recorder:
             separated_reward: Dictionary of reward term names to lists of floats
             it: Current iteration step
         """
+        matplotlib.use('Agg')  # Use non-interactive backend
+
         if len(total_reward) == 0:
             print(f"Warning: No rewards to log at iteration {it}")
             return
@@ -197,11 +202,7 @@ class Recorder:
         if not self.cfg["runner"]["use_wandb"]:
             print(f"Warning: wandb is disabled, skipping reward trajectory logging")
             return
-        
-        import numpy as np
-        import matplotlib
-        matplotlib.use('Agg')  # Use non-interactive backend
-        import matplotlib.pyplot as plt
+            
         
         # Convert total reward to numpy array (should already be list of floats)
         total_reward_np = np.array(total_reward)
@@ -220,10 +221,6 @@ class Recorder:
         
         # Log to wandb
         if self.cfg["runner"]["use_wandb"]:
-            log_dict = {
-                "video/mean_reward": mean_total_reward,
-                "video/sum_reward": sum_total_reward,
-            }
             
             # Create and log figure for total reward
             fig_total = plt.figure(figsize=(12, 4))
@@ -234,7 +231,8 @@ class Recorder:
             plt.grid(True, alpha=0.3)
             plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
             plt.tight_layout()
-            log_dict["video/total_reward_trajectory"] = wandb.Image(fig_total)
+            wandb.log({"video_plots/total_reward_trajectory": wandb.Image(fig_total)}, step=it)
+            print(f"Logged total reward trajectory at iteration {it}")
             plt.close(fig_total)
             
             # Create and log figure for each reward term
@@ -246,12 +244,6 @@ class Recorder:
                 mean_value = float(np.mean(values_np))
                 sum_value = float(np.sum(values_np))
                 
-                # Log statistics
-                self.writer.add_scalar(f"video/reward_terms/{key}/mean", mean_value, it)
-                self.writer.add_scalar(f"video/reward_terms/{key}/sum", sum_value, it)
-                log_dict[f"video/reward_terms/{key}/mean"] = mean_value
-                log_dict[f"video/reward_terms/{key}/sum"] = sum_value
-                
                 # Create figure for this reward term
                 fig_term = plt.figure(figsize=(12, 4))
                 plt.plot(timesteps, values_np, linewidth=2)
@@ -261,7 +253,7 @@ class Recorder:
                 plt.grid(True, alpha=0.3)
                 plt.axhline(y=0, color='k', linestyle='--', alpha=0.3)
                 plt.tight_layout()
-                log_dict[f"video/reward_trajectories/{key}"] = wandb.Image(fig_term)
+                wandb.log({f"video_plots/reward_trajectories/{key}": wandb.Image(fig_term)}, step=it)
                 plt.close(fig_term)
             
-            wandb.log(log_dict, step=it)
+            
