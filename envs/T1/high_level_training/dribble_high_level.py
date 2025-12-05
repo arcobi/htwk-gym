@@ -78,31 +78,6 @@ class DribbleHighLevel(BaseTask):
 
         robot_asset = self.gym.load_asset(self.sim, asset_root, asset_file, asset_options)
         self.robot_body_names = self.gym.get_asset_rigid_body_names(robot_asset)
-
-        # Create ball asset directly as sphere (no URDF)
-        ball_cfg = self.cfg["ball"]
-        self.ball_radius = ball_cfg.get("radius", 0.075)  # Default from old URDF
-        self.ball_mass = ball_cfg.get("mass", 0.2)  # Default from old URDF
-        
-        # Create sphere asset directly
-        ball_asset_options = gymapi.AssetOptions()
-        ball_asset_options.density = ball_cfg["density"]
-        ball_asset_options.angular_damping = 0.0
-        ball_asset_options.linear_damping = 0.0
-        ball_asset_options.max_angular_velocity = 1000.0
-        ball_asset_options.max_linear_velocity = 1000.0
-        ball_asset_options.disable_gravity = False
-        
-        ball_asset = self.gym.create_sphere(self.sim, self.ball_radius, ball_asset_options)
-
-        # Store ball friction parameters for custom friction implementation
-        self.ball_friction_coef = ball_cfg.get("friction", 1.0)
-        self.ball_rolling_friction_coef = ball_cfg.get("rolling_friction", 1.0)
-        self.ball_init_pos = to_torch(ball_cfg["init_pos"], device=self.device)
-        self.ball_init_rot = to_torch(ball_cfg["init_rot"], device=self.device)
-        self.ball_init_lin_vel = to_torch(ball_cfg["init_lin_vel"], device=self.device)
-        self.ball_init_ang_vel = to_torch(ball_cfg["init_ang_vel"], device=self.device)
-
         # Continue with robot setup...
         self.num_dofs = self.gym.get_asset_dof_count(robot_asset)
         self.num_bodies = self.gym.get_asset_rigid_body_count(robot_asset)
@@ -189,26 +164,32 @@ class DribbleHighLevel(BaseTask):
             self.gym.set_actor_rigid_shape_properties(env_handle, actor_handle, shape_props)
             self.gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
 
-            # Create ball actor
-            ball_pose = gymapi.Transform()
-            ball_pose.p = gymapi.Vec3(*self.env_origins[i])
-            ball_pose.p += gymapi.Vec3(self.ball_init_pos[0], self.ball_init_pos[1], self.ball_init_pos[2])
-            ball_pose.r = gymapi.Quat(self.ball_init_rot[0], self.ball_init_rot[1], self.ball_init_rot[2], self.ball_init_rot[3])
+            ball_asset = self._create_ball_asset(radius=apply_randomization(self.cfg["ball"]["radius"], self.cfg["randomization"].get("ball_radius")))
+            ball_handle = self.gym.create_actor(env_handle, ball_asset, start_pose, "ball", i, True, 0)
+            try:
+                ball_body_props = self.gym.get_actor_rigid_body_properties(env_handle, ball_handle)
+                for b in range(len(ball_body_props)):
+                    ball_body_props[b].mass = apply_randomization(self.cfg["ball"]["mass"], self.cfg["randomization"].get("ball_mass"))
+                self.gym.set_actor_rigid_body_properties(env_handle, ball_handle, ball_body_props, recomputeInertia=True)
+            except Exception:
+                print("meh")
+                pass
 
-            ball_handle = self.gym.create_actor(env_handle, ball_asset, ball_pose, ball_cfg["name"], i)
-
-            # Set ball body properties (mass)
-            ball_body_props = self.gym.get_actor_rigid_body_properties(env_handle, ball_handle)
-            ball_body_props[0].mass = self.ball_mass
-            self.gym.set_actor_rigid_body_properties(env_handle, ball_handle, ball_body_props)
-            
-            # Set ball shape properties (restitution, but NOT friction - we'll handle that manually)
-            ball_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, ball_handle)
-            ball_shape_props[0].restitution = ball_cfg["restitution"]
-            # Set friction to 0 in physics engine since we're implementing it manually
-            ball_shape_props[0].friction = 0.0
-            ball_shape_props[0].rolling_friction = 0.0
-            self.gym.set_actor_rigid_shape_properties(env_handle, ball_handle, ball_shape_props)
+            # shape props: restitution/friction
+            try:
+                ball_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, ball_handle)
+                for s in range(len(ball_shape_props)):
+                    ball_shape_props[s].restitution = 0.1
+                    ball_shape_props[s].friction = 1
+                    ball_shape_props[s].rolling_friction = 0.3
+                    ball_shape_props[s].torsion_friction = 0.1
+                    ball_shape_props[s].thickness = 0.01
+                    ball_shape_props[s].contact_offset = 0.02
+                    ball_shape_props[s].rest_offset = 0.0
+                self.gym.set_actor_rigid_shape_properties(env_handle, ball_handle, ball_shape_props)
+            except Exception as e:
+                print(e)
+                pass
 
             # Store handles
             self.envs.append(env_handle)
@@ -220,6 +201,22 @@ class DribbleHighLevel(BaseTask):
         self.ball_rot = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device)
         self.ball_lin_vel = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.ball_ang_vel = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+
+    def _create_ball_asset(self, radius):
+        ball_options = gymapi.AssetOptions()
+        ball_options.fix_base_link = False
+        ball_options.density = 200
+        ball_options.angular_damping = 0.15
+        ball_options.linear_damping = 0.38
+        ball_options.max_angular_velocity = 1000.0
+        ball_options.max_linear_velocity = 20.0
+        ball_options.disable_gravity = False
+        ball_options.replace_cylinder_with_capsule = False
+        ball_options.thickness = 0.01
+
+        ball_asset = self.gym.create_sphere(self.sim, radius, ball_options)
+
+        return ball_asset
 
     def _process_rigid_body_props(self, props, i):
         for j in range(self.num_bodies):
@@ -586,10 +583,10 @@ class DribbleHighLevel(BaseTask):
         
         # Calculate ball's target Z position (on the ground + ball radius)
         if hasattr(self, 'terrain'):
-            ball_target_z = self.terrain.terrain_heights(ball_target_xy) + self.ball_radius
+            ball_target_z = self.terrain.terrain_heights(ball_target_xy) + self.cfg["ball"].get("radius", 0.075)
         else: # Fallback if no terrain, assume ground is at z=0 relative to env_origin
              # This assumes env_origins are at z=0 for the ground level.
-            ball_target_z = torch.full_like(ball_target_xy[:, 0], self.ball_radius)
+            ball_target_z = torch.full_like(ball_target_xy[:, 0], self.cfg["ball"].get("radius", 0.075))
 
 
         # Set ball position
@@ -788,7 +785,7 @@ class DribbleHighLevel(BaseTask):
             self.gym.set_dof_actuation_force_tensor(self.sim, gymtorch.unwrap_tensor(dof_torques))
             
             # Apply custom ball friction before simulation step
-            self._apply_ball_friction()
+            #self._apply_ball_friction()
             
             self.gym.simulate(self.sim)
             if self.device == "cpu":
