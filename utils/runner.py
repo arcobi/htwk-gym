@@ -14,7 +14,7 @@ from envs import *
 # Import torch and utils after isaacgym modules are initialized
 import torch
 import torch.nn.functional as F
-from utils.model import *
+from utils.models.BaseAC import *
 from utils.buffer import ExperienceBuffer
 from utils.utils import discount_values, surrogate_loss
 from utils.recorder import Recorder
@@ -22,6 +22,7 @@ from utils.recorder import Recorder
 # Dynamic task class loading
 import importlib
 import inspect
+import pkgutil
 
 def get_task_class(task_name):
     """
@@ -75,6 +76,59 @@ def get_task_class(task_name):
     return None
 
 
+def get_model_class(model_name):
+    """
+    Resolve a model class by name. Supports names from config/CLI like
+    "BaseActorCritic", "BaseAC", "OdometryActorCritic", or "OdometryAC".
+    Falls back to BaseActorCritic if name is None/empty.
+    """
+    # Default
+    if not model_name:
+        return BaseActorCritic
+
+    key = str(model_name)
+    key_norm = key.replace("_", "").replace(" ", "").lower()
+
+    # Quick direct matches for common defaults
+    if key_norm in {"baseactorcritic", "baseac"}:
+        return BaseActorCritic
+
+    # Dynamically scan utils.models package for classes
+    try:
+        models_pkg = importlib.import_module('utils.models')
+        discovered = []
+        for finder, mod_name, is_pkg in pkgutil.walk_packages(models_pkg.__path__, models_pkg.__name__ + '.'):
+            try:
+                module = importlib.import_module(mod_name)
+            except Exception:
+                continue
+            for attr_name, obj in inspect.getmembers(module, inspect.isclass):
+                # Only consider classes that are defined in the module (avoid imported aliases)
+                if getattr(obj, '__module__', '').startswith(mod_name):
+                    try:
+                        import torch
+                        if issubclass(obj, torch.nn.Module):
+                            discovered.append(obj)
+                    except Exception:
+                        continue
+        # Try exact name match first
+        for cls in discovered:
+            if cls.__name__ == key:
+                return cls
+        # Try normalized name match (ignore underscores/spaces and case)
+        for cls in discovered:
+            if cls.__name__.replace("_", "").replace(" ", "").lower() == key_norm:
+                return cls
+        # As a convenience, prefer classes ending with 'ActorCritic' if multiple choices
+        for cls in discovered:
+            if cls.__name__.lower().endswith('actorcritic') and cls.__name__.lower() == key_norm:
+                return cls
+        available = ', '.join(sorted({c.__name__ for c in discovered}))
+        raise ValueError(f"Unknown model class: {model_name}. Available: {available}")
+    except Exception as e:
+        raise ValueError(f"Unknown model class: {model_name} ({e})")
+
+
 class Runner:
 
     def __init__(self, test=False):
@@ -97,7 +151,10 @@ class Runner:
 
         self.device = self.cfg["basic"]["rl_device"]
         self.learning_rate = self.cfg["algorithm"]["learning_rate"]
-        self.model = ActorCritic(self.env.num_actions, self.env.num_obs, self.env.num_privileged_obs).to(self.device)
+        # Select model by config/CLI
+        model_name = self.cfg["basic"].get("model", "BaseActorCritic")
+        model_class = get_model_class(model_name)
+        self.model = model_class(self.env.num_actions, self.env.num_obs, self.env.num_privileged_obs).to(self.device)
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.learning_rate)
         self._load()
 
@@ -119,6 +176,7 @@ class Runner:
         parser.add_argument("--rl_device", type=str, help="Device for the RL algorithm. Overrides config file if provided.")
         parser.add_argument("--seed", type=int, help="Random seed. Overrides config file if provided.")
         parser.add_argument("--max_iterations", type=int, help="Maximum number of training iterations. Overrides config file if provided.")
+        parser.add_argument("--model", type=str, help="Model class name to use (e.g., BaseActorCritic, OdometryActorCritic). Overrides config file if provided.")
         self.args = parser.parse_args()
 
     # Override config file with args if needed
@@ -126,6 +184,9 @@ class Runner:
         cfg_file = os.path.join("envs", "{}.yaml".format(self.args.task))
         with open(cfg_file, "r", encoding="utf-8") as f:
             self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+        # Ensure default model if not present in config
+        if "model" not in self.cfg.get("basic", {}):
+            self.cfg.setdefault("basic", {})["model"] = "BaseActorCritic"
         for arg in vars(self.args):
             if getattr(self.args, arg) is not None:
                 if arg == "num_envs":
@@ -133,7 +194,13 @@ class Runner:
                 else:
                     self.cfg["basic"][arg] = getattr(self.args, arg)
         if not self.test:
-            self.cfg["viewer"]["record_video"] = False
+            # Enable video recording if wandb video logging is enabled
+            use_wandb = self.cfg["runner"].get("use_wandb", False)
+            log_video_interval = self.cfg["runner"].get("log_video_interval", None)
+            if use_wandb and log_video_interval is not None:
+                self.cfg["viewer"]["record_video"] = True
+            else:
+                self.cfg["viewer"]["record_video"] = False
 
     def _set_seed(self):
         if self.cfg["basic"]["seed"] == -1:
@@ -188,7 +255,28 @@ class Runner:
         obs, infos = self.env.reset()
         obs = obs.to(self.device)
         privileged_obs = infos["privileged_obs"].to(self.device)
+        
+        # Get video logging configuration
+        use_wandb = self.cfg["runner"].get("use_wandb", False)
+        log_video_interval = self.cfg["runner"].get("log_video_interval", None)
+        if log_video_interval is None:
+            log_video_interval = self.cfg["runner"].get("save_interval", None)
+        # Ensure log_video_interval is a positive integer
+        if log_video_interval is not None and log_video_interval <= 0:
+            log_video_interval = None
+        log_video_duration = self.cfg["runner"].get("log_video_duration", 10.0)
+        
         for it in range(self.cfg["basic"]["max_iterations"]):
+            # Check if it's time to log a video
+            should_log_video = (use_wandb and 
+                               log_video_interval is not None and 
+                               log_video_interval > 0 and
+                               (it + 1) % log_video_interval == 0 and
+                               self.cfg["viewer"]["record_video"])
+            
+            if should_log_video:
+                # Capture video frames (this will update obs and privileged_obs)
+                obs, privileged_obs = self._capture_training_video(log_video_duration, it, obs, privileged_obs)
             # within horizon_length, env.step() is called with same act
             for n in range(self.cfg["runner"]["horizon_length"]):
                 self.buffer.update_data("obses", n, obs)
@@ -330,6 +418,68 @@ class Runner:
     def interrupt_handler(self, signal, frame):
         print("\nInterrupt received, waiting for video to finish...")
         self.interrupt = True
+
+    def _capture_training_video(self, duration, it, obs, privileged_obs):
+        """Capture video frames during training for wandb logging.
+        
+        Args:
+            duration: Duration of video in seconds
+            it: Current iteration step
+            obs: Current observations
+            privileged_obs: Current privileged observations
+            
+        Returns:
+            Updated obs and privileged_obs after video capture
+        """
+        # Clear existing frames and ensure camera is initialized
+        if hasattr(self.env, 'camera_frames'):
+            self.env.camera_frames = []
+        
+        # Ensure camera is initialized by calling render once before capturing
+        # This ensures the camera exists and root_states are available
+        if self.cfg["viewer"]["record_video"]:
+            # Refresh root states to ensure camera position is correct
+            self.env.gym.refresh_actor_root_state_tensor(self.env.sim)
+            self.env.render()
+        
+        # Calculate number of frames to capture
+        num_frames = int(duration / self.env.dt)
+        
+        # Capture frames by running the environment
+        frames_captured = 0
+        
+        while frames_captured < num_frames:
+            # Step the environment with current policy first
+            with torch.no_grad():
+                dist = self.model.act(obs)
+                act = dist.sample()
+            
+            obs, rew, done, infos = self.env.step(act)
+            obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
+            privileged_obs = infos["privileged_obs"].to(self.device)
+            
+            # step() already calls render() internally which captures frames
+            # But we ensure render is called to capture the frame
+            # The render() in step() should have already captured the frame,
+            # but we call it again to be safe (it's idempotent for frame capture)
+            if self.cfg["viewer"]["record_video"]:
+                self.env.render()
+            
+            frames_captured += 1
+            
+            # Reset if episode done
+            if done[0]:
+                reset_obs, reset_infos = self.env.reset()
+                obs = reset_obs.to(self.device)
+                privileged_obs = reset_infos["privileged_obs"].to(self.device)
+        
+        # Log video to wandb
+        if hasattr(self.env, 'camera_frames') and len(self.env.camera_frames) > 0:
+            self.recorder.log_video(self.env.camera_frames, it, self.env.dt)
+            # Clear frames to free memory
+            self.env.camera_frames = []
+        
+        return obs, privileged_obs
 
     def _get_robot_type(self, task_name):
         """Determine robot type from task name."""
