@@ -1,15 +1,15 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: false
+  headless: true
   max_iterations: 10000 # set the maximum number of learning iterations to train for
-  sim_device: "cpu" # device for physics simulation
-  rl_device: "cpu" # device for the RL algorithm
+  sim_device: "cuda:0" # device for physics simulation
+  rl_device: "cuda:0" # device for the RL algorithm
   seed: 42 # seed - set to -1 to choose random seed
   description: ""
   task: "K1/BaseWalkK1"
 
 env:
-  num_envs: 1
+  num_envs: 4096
   num_observations: 47
   num_privileged_obs: 14
   num_actions: 12
@@ -19,7 +19,9 @@ runner:
   horizon_length: 24
   mini_epochs: 20
   save_interval: 100
-  use_wandb: false
+  use_wandb: true
+  log_video_interval: 500  # Log video to wandb every N iterations (defaults to save_interval if not specified)
+  log_video_duration: 15.  # Duration of video clip in seconds
 
 viewer:
   pos: [3., -3., 2.]  # [m]
@@ -77,10 +79,10 @@ asset:
   max_linear_velocity: 1000.
   armature: 0.
   thickness: 0.01
-  feet_edge_pos: [[ 0.1215,  0.05, -0.03],
-                  [ 0.1215, -0.05, -0.03],
-                  [-0.1015,  0.05, -0.03],
-                  [-0.1015, -0.05, -0.03]] # x,y,z [m]
+  feet_edge_pos: [[ 0.11,  0.04, -0.02],
+                  [ 0.11, -0.04, -0.02],
+                  [-0.07,  0.04, -0.02],
+                  [-0.07, -0.04, -0.02]] # x,y,z [m]
 
 init_state:
   pos: [0.0, 0.0, 0.72] # x,y,z [m]
@@ -279,6 +281,7 @@ rewards:
     feet_yaw_mean: -1.
     feet_roll: -0.1
     feet_distance: -1.
+    feet_swing: 3.
   episode_length_s: 30.
   terminate_height: 0.45
   terminate_vel: 50.

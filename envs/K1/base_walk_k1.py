@@ -389,6 +389,11 @@ class BaseWalkK1(BaseTask):
             self._refresh_feet_state()
 
     def _resample_commands(self):
+        # Play mode: cycle through fixed command sequence
+        if self.is_play:
+            self._resample_play_commands()
+            return
+
         env_ids = (self.episode_length_buf == self.cmd_resample_time).nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
             return
@@ -416,6 +421,34 @@ class BaseWalkK1(BaseTask):
             (len(env_ids),),
             device=self.device,
         )
+
+    def _resample_play_commands(self):
+        """Fixed command sequence for play mode: forward, sideways, turning, still (3 sec each)"""
+        cycle_duration = 12.0  # Total cycle: 4 phases x 3 seconds
+        current_time = self.common_step_counter * self.dt
+        phase_time = current_time % cycle_duration
+        
+        # Determine which phase we're in (0-3)
+        phase = int(phase_time // 3.0)
+        
+        # Reset commands
+        self.commands[:, :] = 0.0
+        
+        if phase == 0:
+            # Forward: 3 sec with lin_vel_x = 0.7
+            self.commands[:, 0] = 0.7
+            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+        elif phase == 1:
+            # Sideways: 3 sec with lin_vel_y = 0.3
+            self.commands[:, 1] = 0.3
+            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+        elif phase == 2:
+            # Turning: 3 sec with ang_vel_yaw = 0.3
+            self.commands[:, 2] = 0.3
+            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+        else:
+            # Still: 3 sec with all zeros
+            self.gait_frequency[:] = 0.0
 
     def _update_curriculum(self, env_ids):
         if not self.cfg["commands"]["curriculum"]:
