@@ -151,6 +151,7 @@ class Runner:
 
         self.device = self.cfg["basic"]["rl_device"]
         self.learning_rate = self.cfg["algorithm"]["learning_rate"]
+        self.init_learning_rate = self.learning_rate
         # Select model by config/CLI
         model_name = self.cfg["basic"].get("model", "BaseActorCritic")
         model_class = get_model_class(model_name)
@@ -298,6 +299,24 @@ class Runner:
             with torch.no_grad():
                 old_dist = self.model.act(self.buffer["obses"])
                 old_actions_log_prob = old_dist.log_prob(self.buffer["actions"]).sum(dim=-1)
+                # Store old values for value loss clipping
+                old_values = self.model.est_value(self.buffer["obses"], self.buffer["privileged_obses"])
+                old_last_values = self.model.est_value(obs, privileged_obs)
+                # Compute returns once using old values (they shouldn't change during mini epochs)
+                self.buffer["rewards"][self.buffer["time_outs"]] = old_values[self.buffer["time_outs"]]
+                advantages = discount_values(
+                    self.buffer["rewards"],
+                    self.buffer["dones"] | self.buffer["time_outs"],
+                    old_values,
+                    old_last_values,
+                    self.cfg["algorithm"]["gamma"],
+                    self.cfg["algorithm"]["lam"],
+                )
+                returns = old_values + advantages
+                advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+
+            # Get value clip parameter (default to None for no clipping, for backwards compatibility)
+            value_clip_param = self.cfg["algorithm"].get("value_clip_param", None)
 
             mean_value_loss = 0
             mean_actor_loss = 0
@@ -305,20 +324,20 @@ class Runner:
             mean_entropy = 0
             for n in range(self.cfg["runner"]["mini_epochs"]):
                 values = self.model.est_value(self.buffer["obses"], self.buffer["privileged_obses"])
-                last_values = self.model.est_value(obs, privileged_obs)
-                with torch.no_grad():
-                    self.buffer["rewards"][self.buffer["time_outs"]] = values[self.buffer["time_outs"]]
-                    advantages = discount_values(
-                        self.buffer["rewards"],
-                        self.buffer["dones"] | self.buffer["time_outs"],
-                        values,
-                        last_values,
-                        self.cfg["algorithm"]["gamma"],
-                        self.cfg["algorithm"]["lam"],
+
+                # Value loss with optional clipping
+                if value_clip_param is not None:
+                    # Clipped value prediction
+                    values_clipped = old_values + torch.clamp(
+                        values - old_values, -value_clip_param, value_clip_param
                     )
-                    returns = values + advantages
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
-                value_loss = F.mse_loss(values, returns)
+                    # Unclipped and clipped value losses
+                    value_loss_unclipped = (values - returns).pow(2)
+                    value_loss_clipped = (values_clipped - returns).pow(2)
+                    # Take the maximum (more conservative)
+                    value_loss = 0.5 * torch.max(value_loss_unclipped, value_loss_clipped).mean()
+                else:
+                    value_loss = F.mse_loss(values, returns)
 
                 dist = self.model.act(self.buffer["obses"])
                 actions_log_prob = dist.log_prob(self.buffer["actions"]).sum(dim=-1)
@@ -339,25 +358,31 @@ class Runner:
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
                 self.optimizer.step()
 
-                with torch.no_grad():
-                    kl = torch.sum(
-                        torch.log(dist.scale / old_dist.scale)
-                        + 0.5 * (torch.square(old_dist.scale) + torch.square(dist.loc - old_dist.loc)) / torch.square(dist.scale)
-                        - 0.5,
-                        axis=-1,
-                    )
-                    kl_mean = torch.mean(kl)
-                    if kl_mean > self.cfg["algorithm"]["desired_kl"] * 2:
-                        self.learning_rate = max(1e-5, self.learning_rate / 1.5)
-                    elif kl_mean < self.cfg["algorithm"]["desired_kl"] / 2:
-                        self.learning_rate = min(1e-2, self.learning_rate * 1.5)
-                    for param_group in self.optimizer.param_groups:
-                        param_group["lr"] = self.learning_rate
-
                 mean_value_loss += value_loss.item()
                 mean_actor_loss += actor_loss.item()
                 mean_bound_loss += bound_loss.item()
                 mean_entropy += entropy.mean()
+
+            # Calculate KL divergence after all mini epochs (between old and final policy)
+            with torch.no_grad():
+                final_dist = self.model.act(self.buffer["obses"])
+                kl = torch.sum(
+                    torch.log(final_dist.scale / old_dist.scale)
+                    + 0.5 * (torch.square(old_dist.scale) + torch.square(final_dist.loc - old_dist.loc)) / torch.square(final_dist.scale)
+                    - 0.5,
+                    axis=-1,
+                )
+                kl_mean = torch.mean(kl)
+
+                # Adapt learning rate based on KL divergence
+                if kl_mean > self.cfg["algorithm"]["desired_kl"] * 2:
+                    self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                elif kl_mean < self.cfg["algorithm"]["desired_kl"] / 2:
+                    self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+
+                for param_group in self.optimizer.param_groups:
+                    param_group["lr"] = self.learning_rate
+
             mean_value_loss /= self.cfg["runner"]["mini_epochs"]
             mean_actor_loss /= self.cfg["runner"]["mini_epochs"]
             mean_bound_loss /= self.cfg["runner"]["mini_epochs"]
