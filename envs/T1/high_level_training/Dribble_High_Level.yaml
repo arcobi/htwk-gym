@@ -25,12 +25,12 @@ env:
   env_spacing: 5.  # not used with plane terrain
 
 runner:
-  horizon_length: 520
+  horizon_length: 25
   mini_epochs: 50
   save_interval: 100
   use_wandb: true
-  log_video_interval: 5  # Log video to wandb every N iterations (defaults to save_interval if not specified)
-  log_video_duration: 30.  # Duration of video clip in seconds
+  log_video_interval: 100  # Log video to wandb every N iterations (defaults to save_interval if not specified)
+  log_video_duration: 10.  # Duration of video clip in seconds
 
 viewer:
   pos: [3., -3., 2.]  # [m]
@@ -98,8 +98,8 @@ asset:
 
 ball:
   name: "ball"
-  radius: 0.075  # Ball radius in meters (from old URDF)
-  mass: 0.2      # Ball mass in kg (from old URDF)
+  radius: 0.11  # Ball radius in meters (from old URDF)
+  mass: 0.4      # Ball mass in kg (from old URDF)
   init_pos: [0.3, 0.0, 0.06]  # Initial position of the ball
   init_rot: [0.0, 0.0, 0.0, 1.0]  # Initial rotation (quaternion)
   init_lin_vel: [0.0, 0.0, 0.0]  # Initial linear velocity
@@ -223,6 +223,16 @@ randomization:
     range: [-0.1, 0.1]
     operation: "additive"
     distribution: "gaussian"
+
+  ball_radius:
+    range: [-0.02, 0.02]
+    operation: "additive"
+    distribution: "uniform"
+
+  ball_mass:
+    range: [-0.02, 0.02]
+    operation: "additive"
+    distribution: "uniform"
 
   ball_init_pos_x:
     range: [0.2, 0.35]  # Closer to robot for dribbling
