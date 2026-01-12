@@ -1,6 +1,6 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: true
+  headless: false
   max_iterations: 10000 # set the maximum number of learning iterations to train for
   sim_device: "cuda:0" # device for physics simulation
   rl_device: "cuda:0" # device for the RL algorithm
@@ -9,16 +9,16 @@ basic:
   task: "K1/BaseWalkK1"
 
 env:
-  num_envs: 4096
+  num_envs: 10
   num_observations: 47
   num_privileged_obs: 14
   num_actions: 12
   env_spacing: 1.  # not used with plane terrain
 
 runner:
-  horizon_length: 24
-  mini_epochs: 20
-  save_interval: 100
+  horizon_length: 48
+  mini_epochs: 10
+  save_interval: 1000
   use_wandb: true
   log_video_interval: 500  # Log video to wandb every N iterations (defaults to save_interval if not specified)
   log_video_duration: 15.  # Duration of video clip in seconds
@@ -38,6 +38,7 @@ algorithm:
   entropy_coef: -0.01
   symmetric_coef: 10.
   desired_kl: 0.01
+  value_clip_param: 0.2
 
 sim:
   dt: 0.002
@@ -85,15 +86,15 @@ asset:
                   [-0.07, -0.04, -0.02]] # x,y,z [m]
 
 init_state:
-  pos: [0.0, 0.0, 0.72] # x,y,z [m]
+  pos: [0.0, 0.0, 0.58] # x,y,z [m]
   rot: [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
   lin_vel: [0.0, 0.0, 0.0]  # x,y,z [m/s]
   ang_vel: [0.0, 0.0, 0.0]  # x,y,z [rad/s]
   default_joint_angles: {"Hip_Pitch": -0.2, "Knee_Pitch": 0.4, "Ankle_Pitch": -0.25, "default": 0.} # target angles when action = 0.0
 
 control:
-  stiffness: {"Hip_Pitch": 80., "Hip_Roll": 80., "Hip_Yaw": 80., "Knee": 80., "Ankle": 30.} # [N*m/rad] - from IsaacLab K1 config
-  damping: {"Hip_Pitch": 2., "Hip_Roll": 2., "Hip_Yaw": 2., "Knee": 2., "Ankle": 2.} # [N*m*s/rad] - from IsaacLab K1 config
+  stiffness: {"Hip": 80., "Knee": 80., "Ankle": 35., "Default": 10} # [N*m/rad]
+  damping: {"Hip": 4, "Knee": 4, "Ankle": 1, "Default": 1} # [N*m*s/rad]
   armature: {"Hip_Pitch": 0.0478125, "Hip_Roll": 0.0339552, "Hip_Yaw": 0.0282528, "Knee": 0.095625, "Ankle": 0.0565056} # from IsaacLab K1 config
   effort_limit: {"Hip_Pitch": 30., "Hip_Roll": 35., "Hip_Yaw": 20., "Knee": 40., "Ankle": 20.} # [N*m] - from IsaacLab K1 config
   velocity_limit: {"Hip_Pitch": 8., "Hip_Roll": 12.9, "Hip_Yaw": 18., "Knee": 12.5, "Ankle": 18.} # [rad/s] - from IsaacLab K1 config
@@ -280,16 +281,16 @@ rewards:
     feet_yaw_diff: -1.
     feet_yaw_mean: -1.
     feet_roll: -0.1
-    feet_distance: -1.
+    feet_distance: -1
     feet_swing: 3.
   episode_length_s: 30.
   terminate_height: 0.45
   terminate_vel: 50.
   terminate_contacts_on: []
   penalize_contacts_on: ["Trunk", "H1", "H2", "AL", "AR", "Waist", "Hip", "Shank", "Ankle"]
-  only_positive_rewards: true # if true negative total rewards are clipped at zero (avoids early termination problems)
+  only_positive_rewards: false # if true negative total rewards are clipped at zero (avoids early termination problems)
   tracking_sigma: 0.25 # tracking reward = exp(-error^2/sigma)
-  base_height_target: 0.68
+  base_height_target: 0.54
   soft_dof_pos_limit: 0.9 # percentage of urdf limits, values above this limit are penalized (from IsaacLab K1 config)
   soft_dof_vel_limit: 1.
   soft_torque_limit: 1.

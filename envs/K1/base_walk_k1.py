@@ -437,15 +437,15 @@ class BaseWalkK1(BaseTask):
         if phase == 0:
             # Forward: 3 sec with lin_vel_x = 0.7
             self.commands[:, 0] = 0.7
-            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+            self.gait_frequency[:] = 1.5
         elif phase == 1:
             # Sideways: 3 sec with lin_vel_y = 0.3
             self.commands[:, 1] = 0.3
-            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+            self.gait_frequency[:] = 1.5
         elif phase == 2:
             # Turning: 3 sec with ang_vel_yaw = 0.3
             self.commands[:, 2] = 0.3
-            self.gait_frequency[:] = self.cfg["commands"]["gait_frequency"][1]
+            self.gait_frequency[:] = 1.5
         else:
             # Still: 3 sec with all zeros
             self.gait_frequency[:] = 0.0

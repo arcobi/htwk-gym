@@ -3,7 +3,7 @@ import glob
 import yaml
 import argparse
 import torch
-from utils.model import *
+from utils.models.BaseAC import *
 
 def get_robot_type(task_name):
     """Determine robot type from task name."""
@@ -27,7 +27,7 @@ if __name__ == "__main__":
     if args.checkpoint is not None:
         cfg["basic"]["checkpoint"] = args.checkpoint
 
-    model = ActorCritic(cfg["env"]["num_actions"], cfg["env"]["num_observations"], cfg["env"]["num_privileged_obs"])
+    model = BaseActorCritic(cfg["env"]["num_actions"], cfg["env"]["num_observations"], cfg["env"]["num_privileged_obs"])
     if not cfg["basic"]["checkpoint"] or (cfg["basic"]["checkpoint"] == "-1") or (cfg["basic"]["checkpoint"] == -1):
         # Look for models in hierarchical structure: logs/robot_type/task_name/**/*.pth
         task_name = args.task

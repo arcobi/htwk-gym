@@ -150,6 +150,7 @@ class Runner:
             raise ValueError(f"Unknown task: {task_name}. Could not find a class named '{task_name}' in the envs package.")
         
         self.env = task_class(self.cfg)
+        self.env.is_play = test
 
         self.device = self.cfg["basic"]["rl_device"]
         self.learning_rate = self.cfg["algorithm"]["learning_rate"]
