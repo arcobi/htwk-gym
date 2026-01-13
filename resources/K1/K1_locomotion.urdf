@@ -289,7 +289,7 @@
     type="fixed">
     <origin
       xyz="0.0025 0.068 -0.0135"
-      rpy="0 0 0" />
+      rpy="-1.35 0 0" />
     <parent
       link="Left_Arm_1" />
     <child
@@ -516,7 +516,7 @@
     type="fixed">
     <origin
       xyz="0.0025 -0.068 -0.0135"
-      rpy="0 0 0" />
+      rpy="1.35 0 0" />
     <parent
       link="Right_Arm_1" />
     <child

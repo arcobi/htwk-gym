@@ -377,12 +377,21 @@ class Runner:
 
                 entropy = dist.entropy().sum(dim=-1)
 
+                if self.cfg["algorithm"]["min_entropy"] is not None and self.cfg["algorithm"]["max_entropy"] is not None:
+                    min_entropy = self.cfg["algorithm"]["min_entropy"]
+                    max_entropy = self.cfg["algorithm"]["max_entropy"]
+                    loss_entropy = torch.mean((torch.clamp(entropy.mean(), min=min_entropy, max=max_entropy) - entropy.mean())**2)
+                else:
+                    loss_entropy = 0.0
                 loss = (
                     value_loss
                     + actor_loss
                     + self.cfg["algorithm"]["bound_coef"] * bound_loss
                     + self.cfg["algorithm"]["entropy_coef"] * entropy.mean()
+                    + 0.01 * loss_entropy
+                    #+ self.cfg["algorithm"]["symmetry_coef"] * sym_loss
                 )
+
                 self.optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
