@@ -1,6 +1,6 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: false
+  headless: true
   max_iterations: 10000 # set the maximum number of learning iterations to train for
   sim_device: "cuda:0" # device for physics simulation
   rl_device: "cuda:0" # device for the RL algorithm
@@ -9,7 +9,7 @@ basic:
   task: "K1/BaseWalkK1"
 
 env:
-  num_envs: 10
+  num_envs: 1024
   num_observations: 47
   num_privileged_obs: 14
   num_actions: 12
@@ -20,14 +20,14 @@ runner:
   mini_epochs: 10
   save_interval: 1000
   use_wandb: true
-  log_video_interval: 500  # Log video to wandb every N iterations (defaults to save_interval if not specified)
+  log_video_interval: 100  # Log video to wandb every N iterations (defaults to save_interval if not specified)
   log_video_duration: 15.  # Duration of video clip in seconds
 
 viewer:
   pos: [3., -3., 2.]  # [m]
   lookat: [0., 0., 0.]  # [m]
   record_video: true  # only in play
-  record_interval: 5.  # [s]
+  record_interval: 15.  # [s]
   record_env_idx: 0
 
 algorithm:
@@ -257,18 +257,18 @@ randomization:
 
 rewards:
   scales:
-    survival: 0.25
-    tracking_lin_vel_x: 1.0
-    tracking_lin_vel_y: 1.0
-    tracking_ang_vel: 0.5
-    base_height: -20.
-    orientation: -5.
+    survival: 2.0
+    tracking_lin_vel_x: 2.0
+    tracking_lin_vel_y: 2.0
+    tracking_ang_vel: 1.0
+    base_height: -30.
+    orientation: -10.
     torques: -2.e-4
     torque_tiredness: -1.e-2
     power: -2.e-3
     lin_vel_z: -2.
     ang_vel_xy: -0.2
-    dof_vel: -1.e-4
+    dof_vel: -5.e-4
     dof_acc: -1.e-7
     root_acc: -1.e-4
     action_rate: -1.
@@ -281,8 +281,8 @@ rewards:
     feet_yaw_diff: -1.
     feet_yaw_mean: -1.
     feet_roll: -0.1
-    feet_distance: -1
-    feet_swing: 3.
+    feet_distance: -3.
+    feet_swing: 0.
   episode_length_s: 30.
   terminate_height: 0.45
   terminate_vel: 50.
@@ -295,4 +295,4 @@ rewards:
   soft_dof_vel_limit: 1.
   soft_torque_limit: 1.
   swing_period: 0.2
-  feet_distance_ref: 0.2
+  feet_distance_ref: 0.192

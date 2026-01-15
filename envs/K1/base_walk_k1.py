@@ -400,18 +400,10 @@ class BaseWalkK1(BaseTask):
         if self.cfg["commands"]["curriculum"]:
             self._resample_curriculum_commands(env_ids)
         else:
-            self.commands[env_ids, 0] = torch_rand_float(
-                self.cfg["commands"]["lin_vel_x"][0], self.cfg["commands"]["lin_vel_x"][1], (len(env_ids), 1), device=self.device
-            ).squeeze(1)
-            self.commands[env_ids, 1] = torch_rand_float(
-                self.cfg["commands"]["lin_vel_y"][0], self.cfg["commands"]["lin_vel_y"][1], (len(env_ids), 1), device=self.device
-            ).squeeze(1)
-            self.commands[env_ids, 2] = torch_rand_float(
-                self.cfg["commands"]["ang_vel_yaw"][0], self.cfg["commands"]["ang_vel_yaw"][1], (len(env_ids), 1), device=self.device
-            ).squeeze(1)
-        self.gait_frequency[env_ids] = torch_rand_float(
-            self.cfg["commands"]["gait_frequency"][0], self.cfg["commands"]["gait_frequency"][1], (len(env_ids), 1), device=self.device
-        ).squeeze(1)
+            self.commands[env_ids, 0] = 0
+            self.commands[env_ids, 1] = 0
+            self.commands[env_ids, 2] = 0
+        self.gait_frequency[env_ids] = 0
         still_envs = env_ids[torch.randperm(len(env_ids))[: int(self.cfg["commands"]["still_proportion"] * len(env_ids))]]
         self.commands[still_envs, :] = 0.0
         self.gait_frequency[still_envs] = 0.0
@@ -789,7 +781,8 @@ class BaseWalkK1(BaseTask):
             torch.cos(base_yaw) * (self.feet_pos[:, 1, 1] - self.feet_pos[:, 0, 1])
             - torch.sin(base_yaw) * (self.feet_pos[:, 1, 0] - self.feet_pos[:, 0, 0])
         )
-        return torch.clip(self.cfg["rewards"]["feet_distance_ref"] - feet_distance, min=0.0, max=0.1)
+        return torch.abs(self.cfg["rewards"]["feet_distance_ref"] - feet_distance)
+        
 
     def _reward_feet_swing(self):
         left_swing = (torch.abs(self.gait_process - 0.25) < 0.5 * self.cfg["rewards"]["swing_period"]) & (self.gait_frequency > 1.0e-8)
