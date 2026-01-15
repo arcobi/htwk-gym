@@ -422,14 +422,15 @@ class BaseWalkK1(BaseTask):
         
         # Determine which phase we're in (0-3)
         phase = int(phase_time // 3.0)
+        phase = 0
         
         # Reset commands
         self.commands[:, :] = 0.0
         
         if phase == 0:
             # Forward: 3 sec with lin_vel_x = 0.7
-            self.commands[:, 0] = 0.7
-            self.gait_frequency[:] = 1.5
+            self.commands[:, 0] = 0.5
+            self.gait_frequency[:] = 1.0
         elif phase == 1:
             # Sideways: 3 sec with lin_vel_y = 0.3
             self.commands[:, 1] = 0.3
