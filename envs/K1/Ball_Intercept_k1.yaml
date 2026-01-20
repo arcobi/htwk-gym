@@ -1,6 +1,6 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: false
+  headless: true
   max_iterations: 10000 # set the maximum number of learning iterations to train for
   sim_device: "cuda:0" # device for physics simulation
   rl_device: "cuda:0" # device for the RL algorithm
@@ -9,7 +9,7 @@ basic:
   enable_csv_logging: false
 
 env:
-  num_envs: 1
+  num_envs: 1024
   num_observations: 44
   num_privileged_obs: 20
   num_actions: 12
@@ -18,7 +18,7 @@ env:
 runner:
   horizon_length: 24
   mini_epochs: 20
-  save_interval: 100
+  save_interval: 500
   use_wandb: true
 
 viewer:
@@ -36,6 +36,8 @@ algorithm:
   entropy_coef: -0.01
   symmetric_coef: 10.
   desired_kl: 0.01
+  min_entropy: null
+  max_entropy: null
 
 sim:
   dt: 0.002
@@ -232,7 +234,7 @@ randomization:
     operation: "additive"
     distribution: "uniform"
   ball_speed:
-    range: [0.5, 1.5]
+    range: [1.5, 2.0]
     operation: "additive"
     distribution: "uniform"
   ball_angle_xy:
@@ -307,35 +309,37 @@ randomization:
 rewards:
   scales:
     survival: 0.25
-    tracking_lin_vel_x: 1
-    tracking_lin_vel_y: 1
-    tracking_ang_vel: 0.25
-    base_height: -200.
-    orientation: -20
+    tracking_lin_vel_x: 0.
+    tracking_lin_vel_y: 0.
+    tracking_ang_vel: 0.
+    base_height: -30.
+    orientation: -10.
     torques: -2.e-4
     torque_tiredness: -1.e-2
     power: -2.e-3
-    lin_vel_z: -1.5
-    ang_vel_xy: -0.1
-    dof_vel: -3.e-4
+    lin_vel_z: -2.
+    ang_vel_xy: -0.2
+    dof_vel: -5.e-4
     dof_acc: -1.e-7
-    root_acc: -1.e-5
-    action_rate: -1.5
-    dof_pos_limits: -1
-    feet_slip: -1
-    feet_yaw_diff: -3.
-    feet_yaw_mean: -3.
-    feet_roll: -0.3
-    ball_velocity_target_direction: 10
-    kicking_foot_approach_ball_stationary: 10
-    body_alignment_for_kick: 1
-    body_angle: 0.1
-    ball_acceleration: 0.25
+    root_acc: -1.e-4
+    action_rate: -1.
+    dof_pos_limits: -1.
+    dof_vel_limits: -0.
+    torque_limits: -0.
+    collision: -1.
+    feet_slip: -0.1
+    feet_yaw_diff: -1.
+    feet_yaw_mean: -1.
+    feet_roll: -0.1
+    feet_distance: -2
     waiting: -1.0
+    touched_ball: 10.0
+    blocked_ball: 20.0
+    ball_distance: 5.0
+    facing_ball: 2.0
   ball_rolling_scale:
     waiting: 0.0
     survival: 0.5
-    kicking_foot_approach_ball_stationary: 0
 
   episode_length_s: 7.
   terminate_height: 0.45
@@ -349,43 +353,9 @@ rewards:
   soft_dof_vel_limit: 1.
   soft_torque_limit: 1.
   swing_period: 0.2
-  feet_distance_ref_x: 0.05
-  feet_distance_ref_y: 0
+  feet_distance_ref: 0.192
   min_ball_vel_s: 2
   max_ball_vel_x: 3
-  
-  # Parameters for new kick-related rewards
-  ball_target_position: [6.0, 0.0] # Target position for ball to move toward (world frame, z should be ball radius)
-  max_ball_vel_target_reward: 10.0      # Max reward for ball velocity toward target
-  ball_vel_target_direction_sigma: 1.0 # Sigma for ball velocity toward target reward
-  ball_velocity_decay_time: 0.1 # Time constant in seconds for ball velocity decay
-
-  kicking_foot_index: 0                # 0 for left_foot_link, 1 for right_foot_link
-  # kick_velocity_threshold: 0.2         # Min change in ball speed (m/s) to be a kick event
-  # foot_kick_proximity_sigma: 0.1       # Sigma for proximity reward in foot_ball_proximity_and_kick_timing
-  # max_kick_timing_reward: 2.0          # Max reward for foot_ball_proximity_and_kick_timing
-
-  # Parameters for _reward_kicking_foot_approach_ball_stationary
-  ball_stationary_speed_threshold: 0.1 # Max ball speed (m/s) to be considered stationary
-  approach_proximity_sigma: 0.1        # Sigma for proximity reward in kicking_foot_approach_ball_stationary
-  max_approach_reward: 50.0             # Max reward for kicking_foot_approach_ball_stationary
-
-  kick_target_pos_world: [5.0, 0.0, 0.05] # Target position for body alignment (world frame, z should be ball radius)
-  alignment_to_ball_sigma: 0.5         # Sigma for robot-to-ball alignment
-  alignment_to_target_sigma: 0.5       # Sigma for robot-to-target alignment
-  max_alignment_reward: 1.0            # Max reward for body_alignment_for_kick
-  
-  # Parameters for "ball comes to rest after kick" reset condition
-  kick_detection_speed_increase_threshold: 0.5 # Min ball speed increase (m/s) to detect a kick
-  ball_rest_speed_threshold_after_kick: 0.02   # Max ball speed (m/s) to be considered at rest after a kick
-  min_steps_travel_after_kick: 10              # Min sim steps ball must travel after kick before rest check applies
-
-  # Parameters for "ball is still for too long" reset condition
-  max_ball_still_time_s: 2
-
-  # Parameters for "ball is moving for too long" reset condition
-  max_ball_moving_time_s: 5
-
-  # Parameters for ball acceleration reward
-  ball_acceleration_scale: 80.0        # Scaling factor for acceleration towards target
-  max_ball_acceleration_reward: 80.0    # Maximum reward for ball acceleration towards target
+  max_ball_still_time_s: 4.0
+  max_ball_moving_time_s: 4.0
+  touch_ball_distance_threshold: 0.3
