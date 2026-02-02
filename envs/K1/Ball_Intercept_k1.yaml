@@ -9,17 +9,43 @@ basic:
   enable_csv_logging: false
 
 env:
-  num_envs: 1024
-  num_observations: 44
+  num_envs: 2048
+  num_observations: 48  # Added ball velocity (vx, vy)
   num_privileged_obs: 20
   num_actions: 12
   env_spacing: 5.  # not used with plane terrain
+
+# Goalkeeper settings
+goalkeeper:
+  ball_passed_x_threshold: -0.5    # Ball passed robot if behind this threshold
 
 runner:
   horizon_length: 24
   mini_epochs: 20
   save_interval: 500
   use_wandb: true
+  
+  # Curriculum settings for phased training (optional)
+  # Phase 1 (0-2000): Focus on blocking + stability (reduce strike rewards)
+  # Phase 2 (2000-5000): Introduce strike rewards gradually  
+  # Phase 3 (5000+): Full task with all rewards
+  curriculum_enabled: false  # Set to true to enable phased training
+  curriculum_phases:
+    - epoch: 0
+      reward_scales:
+        directional_return: 2.0  # Reduced initially
+        ball_forward_vel: 1.0
+        ball_shot_back: 20.0
+    - epoch: 2000
+      reward_scales:
+        directional_return: 5.0  # Increase
+        ball_forward_vel: 3.0
+        ball_shot_back: 35.0
+    - epoch: 5000
+      reward_scales:
+        directional_return: 8.0  # Full
+        ball_forward_vel: 5.0
+        ball_shot_back: 50.0
 
 viewer:
   pos: [3., -3., 2.]  # [m]
@@ -56,7 +82,7 @@ sim:
     max_depenetration_velocity: 1.0  # from IsaacLab K1 config
     default_buffer_size_multiplier: 5.0
     max_gpu_contact_pairs: 8388608 # 8*1024*1024
-    num_subscenes: 4 # Splits the simulation into N physics scenes and runs each one in a separate thread
+    num_subscenes: 8 # Splits the simulation into N physics scenes and runs each one in a separate thread
     contact_collection: 1 # 0: CC_NEVER (don't collect contact info), 1: CC_LAST_SUBSTEP (collect only contacts on last substep), 2: CC_ALL_SUBSTEPS (broken - do not use!)
 
 asset:
@@ -165,7 +191,7 @@ normalization:
   filter_weight: 0.1
   push_force: 0.1
   push_torque: 0.5
-  clip_actions: 1.
+  clip_actions: 2.0
   ball_pos: 1.0
 
 noise:
@@ -308,54 +334,80 @@ randomization:
 
 rewards:
   scales:
-    survival: 0.25
+    # === Baseline rewards (keep robot alive and stable) ===
+    survival: 5.0                # Erhöht: Stabilität ist wichtiger als nur Nähe zum Ball
+    base_height: -8.0            # Reduziert: Erlaubt tiefere Abwehrhaltung
+    orientation: -4.0            # Leicht reduziert: Balance mit anderen Zielen
+    
+    # === Regularization (smooth movement) ===
+    torques: -5.e-4              # Verstärkt: Effizienter Energieverbrauch
+    power: -2.e-3                # Verstärkt: Verhindert übermäßige Kraftanwendung
+    lin_vel_z: -2.0              # Verstärkt: Verhindert Springen
+    ang_vel_xy: -0.5             # Verstärkt: Reduziert Wackeln
+    dof_vel: -5.e-4              # Verstärkt: Glattere Gelenkbewegungen
+    dof_acc: -2.e-7              # Verstärkt: Sanftere Bewegungen
+    root_acc: -2.e-5             # Verstärkt: Stabilerer Rumpf
+    action_rate: -0.8            # Verstärkt: Glattere Aktionsübergänge
+    dof_pos_limits: -2.0         # Verstärkt: Vermeide Gelenkgrenzen
+    collision: -2.0              # Verstärkt: Vermeide Selbstkollisionen
+    feet_slip: -0.5              # Verstärkt: Besserer Bodenkontakt
+    feet_distance: -1.5          # Leicht reduziert: Weniger dominant
+    
+    # === MAIN GOAL: Block ball (DON'T let it pass!) ===
+    ball_passed_robot: -100.0    # Erhöht: Kritisches Versagen (Torwart-Hauptziel!)
+    goalkeeper_pos: 2.0          # NEU: Belohnt Nähe zum theoretischen Intercept-Punkt (statt Ball)
+    ball_distance: 0.0           # Deaktiviert: "Jagd" ist nicht gewünscht, nur Intercept!
+    facing_ball: 2.0             # Erhöht: Wichtiger für gute Positionierung
+    touched_ball: 3.0            # Reduziert: Jetzt ergänzend zu directional_return
+    blocked_ball: 80.0           # Erhöht: Hauptziel - Ball erfolgreich blockiert!
+    
+    # === NEW: Fix specific behavior problems ===
+    ball_between_legs: -20.0     # Penalty: Verhindert "Verhaken" / Ball einklemmen
+    still_stance: 5.0            # Reward: Belohnt ruhiges Stehen AM Intercept-Punkt!
+    ball_lateral_vel: -2.0       # Penalty: Bestraft seitliches Wegrollen (soll gerade zurück!)
+    ball_forward_vel: 5.0        # Reward: Belohnt Geschwindigkeit nach vorne (aktiver Schuss)
+
+    # === SIDE GOAL: Shoot ball back (positive X direction) ===
+    ball_shot_back: 50.0         # Erhöht: Belohnung für aktives Zurückschießen
+    directional_return: 8.0      # NEW: Dense reward for forward velocity after contact (time-windowed)
+    soft_rebound_penalty: -5.0   # NEW: Penalty for weak/dead rebounds after contact
+    
+    # === Disabled ===
     tracking_lin_vel_x: 0.
     tracking_lin_vel_y: 0.
     tracking_ang_vel: 0.
-    base_height: -30.
-    orientation: -10.
-    torques: -2.e-4
-    torque_tiredness: -1.e-2
-    power: -2.e-3
-    lin_vel_z: -2.
-    ang_vel_xy: -0.2
-    dof_vel: -5.e-4
-    dof_acc: -1.e-7
-    root_acc: -1.e-4
-    action_rate: -1.
-    dof_pos_limits: -1.
-    dof_vel_limits: -0.
-    torque_limits: -0.
-    collision: -1.
-    feet_slip: -0.1
-    feet_yaw_diff: -1.
-    feet_yaw_mean: -1.
-    feet_roll: -0.1
-    feet_distance: -2
-    waiting: -1.0
-    touched_ball: 10.0
-    blocked_ball: 20.0
-    ball_distance: 5.0
-    facing_ball: 2.0
-  ball_rolling_scale:
-    waiting: 0.0
-    survival: 0.5
+    torque_tiredness: 0.
+    dof_vel_limits: 0.
+    torque_limits: 0.
+    feet_yaw_diff: 0.
+    feet_yaw_mean: 0.
+    feet_roll: 0.
+    waiting: 0.
 
-  episode_length_s: 7.
-  terminate_height: 0.45
-  terminate_vel: 50.
+  episode_length_s: 6.0           # Short episode for blocking task
+  terminate_height: 0.30
+  terminate_lin_vel: 10.0  # Linear velocity limit in m/s
+  terminate_ang_vel: 20.0  # Angular velocity limit in rad/s
   terminate_contacts_on: []
   penalize_contacts_on: ["Trunk", "H1", "H2", "AL", "AR", "Waist", "Hip", "Shank", "Ankle"]
   only_positive_rewards: false # if true negative total rewards are clipped at zero (avoids early termination problems)
   tracking_sigma: 0.25 # tracking reward = exp(-error^2/sigma)
   base_height_target: 0.54
-  soft_dof_pos_limit: 1. # percentage of urdf limits, values above this limit are penalized
+  soft_dof_pos_limit: 0.9 # percentage of urdf limits, values above this limit are penalized
   soft_dof_vel_limit: 1.
   soft_torque_limit: 1.
   swing_period: 0.2
   feet_distance_ref: 0.192
-  min_ball_vel_s: 2
-  max_ball_vel_x: 3
-  max_ball_still_time_s: 4.0
-  max_ball_moving_time_s: 4.0
-  touch_ball_distance_threshold: 0.3
+  # Ball termination settings
+  max_ball_still_time_s: 3.0      # Terminate if ball is still for 3s (should be kicked by then)
+  max_ball_moving_time_s: 5.0     # Terminate if ball keeps moving for 5s (something went wrong)
+  ball_passed_terminate: true     # Terminate if ball passes behind robot (goalkeeper failed)
+  shot_back_terminate: true       # Terminate on successful shot back (success!)
+  shot_back_min_speed: 0.8        # Minimum ball speed for successful shot back
+  touch_ball_distance_threshold: 0.15
+  
+  # Time-windowed return reward settings
+  return_time_window_s: 0.5       # Time window after contact for directional return reward
+  soft_rebound_window_s: 0.3      # Time window to check for soft rebounds after contact
+  soft_rebound_min_speed: 0.3     # Below this speed = soft rebound (penalty)
+  ball_stationary_speed_threshold: 0.1  # Below this = ball is stationary
