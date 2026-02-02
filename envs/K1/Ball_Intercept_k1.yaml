@@ -10,14 +10,14 @@ basic:
 
 env:
   num_envs: 2048
-  num_observations: 48  # Added ball velocity (vx, vy)
+  num_observations: 46  # Ball position (current + history)
   num_privileged_obs: 20
   num_actions: 12
   env_spacing: 5.  # not used with plane terrain
 
 # Goalkeeper settings
 goalkeeper:
-  ball_passed_x_threshold: -0.5    # Ball passed robot if behind this threshold
+  ball_passed_x_threshold: -0.3    # Ball passed robot if behind this threshold
 
 runner:
   horizon_length: 24
@@ -51,7 +51,7 @@ viewer:
   pos: [3., -3., 2.]  # [m]
   lookat: [15., 0., 0.]  # [m]
   record_video: true  # only in play
-  record_interval: 5.  # [s]
+  record_interval: 10.  # [s]
   record_env_idx: 0
 
 algorithm:
@@ -112,18 +112,19 @@ asset:
 
 ball:
   name: "ball"
-  radius: 0.11  # Ball radius in meters (from old URDF)
-  mass: 0.4      # Ball mass in kg (from old URDF)
+  radius: 0.11  # Ball radius in meters
+  mass: 0.4      # Ball mass in kg
   init_pos: [0.3, 0.0, 0.06]  # Initial position of the ball
   init_rot: [0.0, 0.0, 0.0, 1.0]  # Initial rotation (quaternion)
   init_lin_vel: [0.0, 0.0, 0.0]  # Initial linear velocity
   init_ang_vel: [0.0, 0.0, 0.0]  # Initial angular velocity
-  restitution: 0.0  # Bounciness
-  friction: 1.0  # Custom friction coefficient (applied manually)
-  rolling_friction: 1.0  # Custom rolling friction coefficient (applied manually)
-  density: 0.001
-  spawn_radius: 1  # Maximum distance from robot to place the ball at reset
-
+  restitution: 0.1  # Bounciness
+  friction: 1.0  # Custom friction coefficient
+  rolling_friction: 0.3  # Custom rolling friction coefficient
+  torsion_friction: 0.1
+  density: 200
+  spawn_radius: 1.5  # Maximum distance from robot to place the ball at reset
+  
 init_state:
   pos: [0.0, 0.0, 0.72] # x,y,z [m]
   rot: [0.0, 0.0, 0.0, 1.0] # x,y,z,w [quat]
@@ -256,7 +257,7 @@ randomization:
     operation: "additive"
     distribution: "uniform"
   ball_init_pos_y:
-    range: [-1.0, 1.0]
+    range: [-1.3, 1.3]
     operation: "additive"
     distribution: "uniform"
   ball_speed:
@@ -264,7 +265,7 @@ randomization:
     operation: "additive"
     distribution: "uniform"
   ball_angle_xy:
-    range: [-0.2, 0.2]
+    range: [-0.3, 0.3]
     operation: "additive"
     distribution: "uniform"
 
@@ -335,37 +336,35 @@ randomization:
 rewards:
   scales:
     # === Baseline rewards (keep robot alive and stable) ===
-    survival: 5.0                # Erhöht: Stabilität ist wichtiger als nur Nähe zum Ball
-    base_height: -8.0            # Reduziert: Erlaubt tiefere Abwehrhaltung
-    orientation: -4.0            # Leicht reduziert: Balance mit anderen Zielen
+    survival: 3.0                # Erhöht: Stabilität ist wichtiger als nur Nähe zum Ball
+    base_height: -10.0           # Reduziert: Erlaubt tiefere Abwehrhaltung
+    orientation: -5.0            # Leicht reduziert: Balance mit anderen Zielen
     
     # === Regularization (smooth movement) ===
-    torques: -5.e-4              # Verstärkt: Effizienter Energieverbrauch
-    power: -2.e-3                # Verstärkt: Verhindert übermäßige Kraftanwendung
-    lin_vel_z: -2.0              # Verstärkt: Verhindert Springen
-    ang_vel_xy: -0.5             # Verstärkt: Reduziert Wackeln
-    dof_vel: -5.e-4              # Verstärkt: Glattere Gelenkbewegungen
-    dof_acc: -2.e-7              # Verstärkt: Sanftere Bewegungen
-    root_acc: -2.e-5             # Verstärkt: Stabilerer Rumpf
-    action_rate: -0.8            # Verstärkt: Glattere Aktionsübergänge
-    dof_pos_limits: -2.0         # Verstärkt: Vermeide Gelenkgrenzen
-    collision: -2.0              # Verstärkt: Vermeide Selbstkollisionen
-    feet_slip: -0.5              # Verstärkt: Besserer Bodenkontakt
-    feet_distance: -1.5          # Leicht reduziert: Weniger dominant
+    torques: -2.e-4
+    power: -2.e-3
+    lin_vel_z: -2.
+    ang_vel_xy: -0.2
+    dof_vel: -5.e-4
+    dof_acc: -1.e-7
+    root_acc: -1.e-4
+    action_rate: -1.
+    dof_pos_limits: -1.
+    collision: -1.
+    feet_slip: -0.1
+    feet_distance: -2.0
     
     # === MAIN GOAL: Block ball (DON'T let it pass!) ===
     ball_passed_robot: -100.0    # Erhöht: Kritisches Versagen (Torwart-Hauptziel!)
-    goalkeeper_pos: 2.0          # NEU: Belohnt Nähe zum theoretischen Intercept-Punkt (statt Ball)
+    goalkeeper_pos: 1.5          # NEU: Belohnt Nähe zum theoretischen Intercept-Punkt (statt Ball)
     ball_distance: 0.0           # Deaktiviert: "Jagd" ist nicht gewünscht, nur Intercept!
-    facing_ball: 2.0             # Erhöht: Wichtiger für gute Positionierung
+    facing_ball: 1.0             # Erhöht: Wichtiger für gute Positionierung
     touched_ball: 3.0            # Reduziert: Jetzt ergänzend zu directional_return
     blocked_ball: 80.0           # Erhöht: Hauptziel - Ball erfolgreich blockiert!
     
     # === NEW: Fix specific behavior problems ===
-    ball_between_legs: -20.0     # Penalty: Verhindert "Verhaken" / Ball einklemmen
-    still_stance: 5.0            # Reward: Belohnt ruhiges Stehen AM Intercept-Punkt!
     ball_lateral_vel: -2.0       # Penalty: Bestraft seitliches Wegrollen (soll gerade zurück!)
-    ball_forward_vel: 5.0        # Reward: Belohnt Geschwindigkeit nach vorne (aktiver Schuss)
+    ball_forward_vel: 8.0        # Reward: Belohnt Geschwindigkeit nach vorne (aktiver Schuss)
 
     # === SIDE GOAL: Shoot ball back (positive X direction) ===
     ball_shot_back: 50.0         # Erhöht: Belohnung für aktives Zurückschießen
@@ -408,6 +407,6 @@ rewards:
   
   # Time-windowed return reward settings
   return_time_window_s: 0.5       # Time window after contact for directional return reward
-  soft_rebound_window_s: 0.3      # Time window to check for soft rebounds after contact
   soft_rebound_min_speed: 0.3     # Below this speed = soft rebound (penalty)
+  soft_rebound_tau_s: 0.15        # Time constant for exponential decay of penalty
   ball_stationary_speed_threshold: 0.1  # Below this = ball is stationary

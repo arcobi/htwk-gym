@@ -154,7 +154,7 @@ class BallInterceptK1(BaseTask):
         ball_cfg = self.cfg["ball"]
 
         # Store ball properties
-        self.ball_radius = 0.05  # From URDF
+        self.ball_radius = float(ball_cfg["radius"])
         self.ball_init_pos = to_torch(ball_cfg["init_pos"], device=self.device)
         self.ball_init_rot = to_torch(ball_cfg["init_rot"], device=self.device)
         self.ball_init_lin_vel = to_torch(ball_cfg["init_lin_vel"], device=self.device)
@@ -206,10 +206,10 @@ class BallInterceptK1(BaseTask):
             try:
                 ball_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, ball_handle)
                 for s in range(len(ball_shape_props)):
-                    ball_shape_props[s].restitution = 0.1
-                    ball_shape_props[s].friction = 1
-                    ball_shape_props[s].rolling_friction = 0.3
-                    ball_shape_props[s].torsion_friction = 0.1
+                    ball_shape_props[s].restitution = self.cfg["ball"].get("restitution", 0.1)
+                    ball_shape_props[s].friction = self.cfg["ball"].get("friction", 1.0)
+                    ball_shape_props[s].rolling_friction = self.cfg["ball"].get("rolling_friction", 0.3)
+                    ball_shape_props[s].torsion_friction = self.cfg["ball"].get("torsion_friction", 0.1)
                     ball_shape_props[s].thickness = 0.01
                     ball_shape_props[s].contact_offset = 0.02
                     ball_shape_props[s].rest_offset = 0.0
@@ -649,12 +649,15 @@ class BallInterceptK1(BaseTask):
         # Rotate forward vector to world frame
         forward_vec_world = quat_rotate(robot_quat, forward_vec_local)
 
+        # Define right vector in world frame
+        right_vec_xy = torch.stack([forward_vec_world[:, 1], -forward_vec_world[:, 0]], dim=-1)
+
         ball_init_pos = torch.zeros_like(forward_vec_world)
         ball_init_pos[:, 0] = apply_randomization(ball_init_pos[:, 0], self.cfg["randomization"].get("ball_init_pos_x"))
         ball_init_pos[:, 1] = apply_randomization(ball_init_pos[:, 1], self.cfg["randomization"].get("ball_init_pos_y"))
 
         # Calculate ball's target XY position
-        ball_target_xy = robot_pos[:, 0:2] + forward_vec_world[:, 0:2] * ball_init_pos[:, 0:2]
+        ball_target_xy = robot_pos[:, 0:2] + forward_vec_world[:, 0:2] * ball_init_pos[:, 0].unsqueeze(1) + right_vec_xy[:, 0:2] * ball_init_pos[:, 1].unsqueeze(1)
         
         # Calculate ball's target Z position (on the ground + ball radius)
         if hasattr(self, 'terrain'):
@@ -672,11 +675,19 @@ class BallInterceptK1(BaseTask):
         # Set ball orientation to default (identity quaternion)
         identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids_to_reset_ball), 1)
         self.root_states[env_ids_to_reset_ball, 1, 3:7] = identity_quat
-        
+
         # Set ball linear and angular velocities to zero
         self.root_states[env_ids_to_reset_ball, 1, 7:13] = 0.0
-        self.root_states[env_ids_to_reset_ball, 1, 7] = -apply_randomization(self.root_states[env_ids_to_reset_ball, 1, 7], self.cfg["randomization"].get("ball_speed"))
 
+        # Calculate ball vx and vy with ball_speed and ball_angle_xy randomization
+        theta = apply_randomization(torch.full((len(env_ids_to_reset_ball), 1), 0.0, device=self.device), self.cfg["randomization"].get("ball_angle_xy"))
+        speed = apply_randomization(self.root_states[env_ids_to_reset_ball, 1, 7], self.cfg["randomization"].get("ball_speed"))
+        vx = -speed.unsqueeze(1) * torch.cos(theta)
+        vy = speed.unsqueeze(1) * torch.sin(theta)
+
+        # Set ball vx and vy
+        self.root_states[env_ids_to_reset_ball, 1, 7] = vx.squeeze(1)
+        self.root_states[env_ids_to_reset_ball, 1, 8] = vy.squeeze(1)
 
         # Update only the ball actors in the simulation
         ball_actor_indices = (2 * env_ids_to_reset_ball + 1).to(dtype=torch.int32)
@@ -1143,10 +1154,6 @@ class BallInterceptK1(BaseTask):
         ball_pos_world_frame = self.ball_pos - self.base_pos
         relative_ball_pos = quat_rotate_inverse(self.base_quat, ball_pos_world_frame)
         
-        # Calculate ball velocity in robot frame (critical for predicting ball motion)
-        ball_vel_world = self.root_states[:, 1, 7:10]
-        relative_ball_vel = quat_rotate_inverse(self.base_quat, ball_vel_world)
-        
         # Calculate ball position 40ms ago relative to the robot
         # Use stored history position directly (history is updated in step())
         ball_pos_history_world_frame = self.ball_pos_history[:, 1] - self.base_pos
@@ -1158,8 +1165,6 @@ class BallInterceptK1(BaseTask):
                 apply_randomization(self.base_ang_vel, self.cfg["noise"].get("ang_vel")) * self.cfg["normalization"]["ang_vel"],
                 # Use relative ball position in observations
                 apply_randomization(relative_ball_pos[:, 0:2], self.cfg["noise"].get("ball_pos")) * self.cfg["normalization"]["ball_pos"],
-                # Ball velocity in robot frame (NEW - helps predict ball motion)
-                apply_randomization(relative_ball_vel[:, 0:2], self.cfg["noise"].get("ball_pos")) * self.cfg["normalization"]["ball_pos"],
                 apply_randomization(self.dof_pos - self.default_dof_pos, self.cfg["noise"].get("dof_pos")) * self.cfg["normalization"]["dof_pos"],
                 apply_randomization(self.dof_vel, self.cfg["noise"].get("dof_vel")) * self.cfg["normalization"]["dof_vel"],
                 self.actions,
@@ -1503,7 +1508,7 @@ class BallInterceptK1(BaseTask):
         """Dense reward for post-contact ball velocity toward goal (time-windowed).
         This rewards intentional strikes, not just random bounces."""
         # Only reward within time window after contact (e.g., 0.5s)
-        time_window = self.cfg["rewards"].get("return_time_window_s", 0.5)
+        time_window = self.cfg["rewards"].get("return_time_window_s", 2.0)
         within_window = self.time_since_contact < time_window
         had_contact_recently = self.time_since_contact > 0.0  # Some contact happened
         
@@ -1526,47 +1531,30 @@ class BallInterceptK1(BaseTask):
     
     def _reward_soft_rebound_penalty(self):
         """Penalty for soft/dead rebounds after contact (ball stops or dribbles).
-        Encourages clean strikes over weak touches."""
-        # Check if had contact recently (within 0.3s)
-        time_window = self.cfg["rewards"].get("soft_rebound_window_s", 0.3)
-        within_window = self.time_since_contact < time_window
-        had_contact_recently = self.time_since_contact > 0.0
-        
-        # Ball speed
-        ball_speed = torch.norm(self.root_states[:, 1, 7:10], dim=-1)
-        
-        # Penalty if ball is moving too slowly after contact
+        Uses exponential decay to smooth penalty window over time.
+        Continuous softness metric: 0 (fast) -> 1 (still)."""
+        # must be negative to be a penalty (or weight it negative outside)
         min_speed = self.cfg["rewards"].get("soft_rebound_min_speed", 0.3)
-        is_soft = ball_speed < min_speed
-        
-        # Apply penalty within time window
-        penalty = is_soft.float() * within_window.float() * had_contact_recently.float()
-        
-        return penalty
+        tau = self.cfg["rewards"].get("soft_rebound_tau_s", 0.15)
 
-    def _reward_ball_between_legs(self):
-        """Penalty if ball is caught under the robot (between legs) to prevent trapping."""
-        # Ball position relative to robot base (World frame diff)
-        ball_rel = self.ball_pos - self.base_pos
-        
-        # Transform to local frame to check lateral/forward position accurately
-        ball_local = quat_rotate_inverse(self.base_quat, ball_rel)
-        
-        # Check if ball is "under" robot
-        # x between -0.3 and 0.3 (roughly body length)
-        # y between -0.2 and 0.2 (between feet)
-        # z < 0.3 (on ground/low)
-        is_under_x = torch.abs(ball_local[:, 0]) < 0.2
-        is_under_y = torch.abs(ball_local[:, 1]) < 0.2
-        is_low = ball_local[:, 2] < 0.4
-        
-        is_trapped = is_under_x & is_under_y & is_low
-        
-        return is_trapped.float()
+        # "contact happened" mask (better: explicit contact flag if you have one)
+        had_contact = (self.time_since_contact > 0.0).float()
+
+        # decay after contact (instead of hard 0.3s window)
+        decay = torch.exp(-self.time_since_contact / tau)
+        weight = had_contact * decay
+
+        ball_vel_world = self.root_states[:, 1, 7:10]
+        ball_speed = torch.norm(ball_vel_world, dim=-1)
+
+        # continuous softness (0 if fast enough, ->1 if stopped)
+        softness = torch.clamp((min_speed - ball_speed) / (min_speed + 1e-6), 0.0, 1.0)
+
+        return -(softness * weight)
 
     def _reward_ball_lateral_vel(self):
         """Penalty for ball moving sideways (Y-axis) instead of forward."""
-        # Ball velocity in local robot frame (so 'sideways' is relative to robot facing)
+        
         ball_vel_world = self.root_states[:, 1, 7:10]
         ball_vel_local = quat_rotate_inverse(self.base_quat, ball_vel_world)
         
@@ -1580,43 +1568,12 @@ class BallInterceptK1(BaseTask):
         return vel_y * is_moving.float()
 
     def _reward_ball_forward_vel(self):
-        """Dense reward for ball moving forward (positive X in local frame).
-        Time-windowed to reward only shortly after contact (avoids rewarding initial ball roll)."""
-        # Only reward within time window after contact
-        time_window = self.cfg["rewards"].get("return_time_window_s", 0.5)
-        within_window = self.time_since_contact < time_window
-        had_contact_recently = self.time_since_contact > 0.0
-        
+        """Dense reward for ball moving forward (positive X in local frame)."""
         ball_vel_world = self.root_states[:, 1, 7:10]
         ball_vel_local = quat_rotate_inverse(self.base_quat, ball_vel_world)
-        
-        # Reward positive X velocity (forward shot)
-        vel_x = ball_vel_local[:, 0]
-        
-        # Apply only within window
-        reward = torch.clamp(vel_x, min=0.0) * within_window.float() * had_contact_recently.float()
-        
-        return reward
 
-    def _reward_still_stance(self):
-        """Reward for standing still when AT THE TARGET POSITION."""
-        # Calculate distance to current target (Intercept Point or 0,0)
-        dist_to_target = torch.norm(self.base_pos[:, :2] - self.goalkeeper_target, dim=-1)
-        
-        # If robot is close to target (< 0.3m), reward stillness
-        is_at_position = dist_to_target < 0.3
-        
-        # Measure of 'non-stillness' (velocity + ang velocity + joint velocity)
-        base_vel = torch.norm(self.base_lin_vel, dim=-1)
-        base_ang = torch.norm(self.base_ang_vel, dim=-1)
-        
-        # Penalty increases with movement
-        penalty = base_vel + base_ang
-        
-        # Reward is inverse of movement, applied only when at position
-        reward = torch.exp(-2.0 * penalty)
-        
-        return reward * is_at_position.float()
+        vel_x = ball_vel_local[:, 0]
+        return torch.clamp(vel_x, min=0.0)
 
     def _reward_goalkeeper_pos(self):
         """Reward for being close to the calculated defense target (Intercept or Center)."""
