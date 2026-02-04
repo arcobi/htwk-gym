@@ -393,6 +393,15 @@ class BallInterceptK1(BaseTask):
         # Track time since last contact with ball (for time-windowed return rewards)
         self.time_since_contact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.had_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.had_contact_once = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        
+        # Track initial robot position and orientation at episode start (for direction-based rewards)
+        self.initial_robot_pos = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+        self.initial_robot_quat = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device)
+        self.initial_robot_forward = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
+        
+        # Track previous distance to intercept target for velocity-based rewards
+        self.prev_dist_to_target = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
     def _prepare_reward_function(self):
         """Prepares a list of reward functions, whcih will be called to compute the total reward.
@@ -587,6 +596,18 @@ class BallInterceptK1(BaseTask):
         # Reset contact tracking
         self.time_since_contact[env_ids] = 0.0
         self.had_contact[env_ids] = False
+        self.had_contact_once[env_ids] = False
+        
+        # Save initial robot position and orientation for direction-based rewards
+        self.gym.refresh_actor_root_state_tensor(self.sim)
+        self.initial_robot_pos[env_ids] = self.root_states[env_ids, 0, 0:3]
+        self.initial_robot_quat[env_ids] = self.root_states[env_ids, 0, 3:7]
+        # Calculate initial forward direction in world frame
+        forward_local = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(len(env_ids), 1)
+        self.initial_robot_forward[env_ids] = quat_rotate(self.initial_robot_quat[env_ids], forward_local)
+        
+        # Reset previous distance to target (will be updated in next step)
+        self.prev_dist_to_target[env_ids] = 0.0
 
     def _reset_dofs(self, env_ids):
         self.dof_pos[env_ids] = apply_randomization(self.default_dof_pos, self.cfg["randomization"].get("init_dof_pos"))
@@ -854,10 +875,16 @@ class BallInterceptK1(BaseTask):
         is_touching = (distances < self.cfg["rewards"]["touch_ball_distance_threshold"]).any(dim=1)
         
         # Reset time_since_contact on new contact, otherwise increment
+        new_contact = is_touching & ~self.had_contact
+        self.had_contact_once = self.had_contact_once | new_contact
         self.time_since_contact = torch.where(
-            is_touching & ~self.had_contact,  # New contact (wasn't touching before)
+            new_contact,
             torch.zeros_like(self.time_since_contact),
-            self.time_since_contact + self.dt
+            torch.where(
+                self.had_contact_once,
+                self.time_since_contact + self.dt,
+                torch.zeros_like(self.time_since_contact)
+            ),
         )
         self.had_contact = is_touching
 
@@ -1035,16 +1062,15 @@ class BallInterceptK1(BaseTask):
         self.time_out_buf = self.episode_length_buf > np.ceil(self.cfg["rewards"]["episode_length_s"] / self.dt)
         self.reset_buf |= self.time_out_buf
         
-        # GOALKEEPER FAIL: Ball passed behind robot
+        # GOALKEEPER FAIL: Ball passed behind INITIAL robot position
         if self.cfg["rewards"].get("ball_passed_terminate", True):
-            # Get robot's forward direction in world frame
-            forward_local = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-            forward_world = quat_rotate(self.base_quat, forward_local)
+            # Use INITIAL robot forward direction (robot can't cheat by turning)
+            forward_world = self.initial_robot_forward
             
-            # Vector from robot to ball
-            robot_to_ball = self.ball_pos[:, :2] - self.base_pos[:, :2]
+            # Vector from INITIAL robot position to ball
+            robot_to_ball = self.ball_pos[:, :2] - self.initial_robot_pos[:, :2]
             
-            # Dot product: negative means ball is behind robot
+            # Dot product: negative means ball is behind initial robot position
             ball_behind_robot = torch.sum(robot_to_ball * forward_world[:, :2], dim=-1)
             
             # Threshold from config
@@ -1055,15 +1081,19 @@ class BallInterceptK1(BaseTask):
             if torch.any(ball_passed_term):
                 self.env_falling += torch.sum(ball_passed_term)  # Count as failure
         
-        # SUCCESS: Ball shot back (positive X velocity after being blocked)
+        # SUCCESS: Ball shot back (using initial forward direction)
         if self.cfg["rewards"].get("shot_back_terminate", True):
-            # Ball velocity (world frame)
-            ball_vel_x = self.root_states[:, 1, 7]  # X velocity
-            ball_speed = torch.norm(self.root_states[:, 1, 7:9], dim=-1)
+            # Ball velocity in world frame
+            ball_vel_world = self.root_states[:, 1, 7:10]
+            ball_speed = torch.norm(ball_vel_world, dim=-1)
             
-            # Ball shot back if: positive X velocity + fast enough + was blocked
+            # Check if ball is moving in initial forward direction
+            vel_in_forward_dir = torch.sum(ball_vel_world * self.initial_robot_forward, dim=-1)
+            
+            # Ball shot back if: moving in forward direction + fast enough + had contact
             min_speed = self.cfg["rewards"].get("shot_back_min_speed", 0.8)
-            shot_back_term = (ball_vel_x > 0) & (ball_speed > min_speed) & self.blocked_ball_buffer
+            had_contact = self.had_contact  # Track if any contact happened
+            shot_back_term = (vel_in_forward_dir > 0.5) & (ball_speed > min_speed) & had_contact
             self.reset_buf |= shot_back_term
             if torch.any(shot_back_term):
                 self.env_successes += torch.sum(shot_back_term)
@@ -1096,7 +1126,7 @@ class BallInterceptK1(BaseTask):
         ball_is_moving = torch.norm(self.root_states[:, 1, 7:10], dim=-1) > ball_speed_threshold
 
         # --- CALCULATE GOALKEEPER TARGET (Intercept vs Return) ---
-        target_x_def = 0.5  # Defense line x-coordinate
+        target_x_def = 0.3  # Defense line x-coordinate
         ball_pos = self.ball_pos
         ball_vel = self.root_states[:, 1, 7:10] # World frame
         
@@ -1110,7 +1140,7 @@ class BallInterceptK1(BaseTask):
         pred_y = ball_pos[:, 1] + ball_vel[:, 1] * time_to_intercept
         
         # Logic: 
-        # 1. Ball must be in front of defense line (ball_x > 0.5)
+        # 1. Ball must be in front of defense line (ball_x > 0.3)
         # 2. Ball must be moving towards robot (vel_x < -0.2)
         # 3. Time to intercept must be positive (ball hasn't passed theoretically)
         should_intercept = (ball_pos[:, 0] > target_x_def) & (ball_vel[:, 0] < -0.2) & (time_to_intercept > 0)
@@ -1195,7 +1225,7 @@ class BallInterceptK1(BaseTask):
 
     def _reward_tracking_lin_vel_x(self):
         # Tracking of linear velocity commands (x axes)
-       return torch.exp(-torch.square(0 - self.filtered_lin_vel[:, 0]) / self.cfg["rewards"]["tracking_sigma"])
+        return torch.exp(-torch.square(0 - self.filtered_lin_vel[:, 0]) / self.cfg["rewards"]["tracking_sigma"])
 
     def _reward_tracking_lin_vel_y(self):
         # Tracking of linear velocity commands (y axes)
@@ -1458,45 +1488,48 @@ class BallInterceptK1(BaseTask):
     # ------------ GOALKEEPER REWARD FUNCTIONS ----------------
     
     def _reward_ball_passed_robot(self):
-        """CRITICAL PENALTY: Ball passed behind the robot (goalkeeper failed)."""
-        # Get robot's forward direction in world frame
-        forward_local = torch.tensor([1.0, 0.0, 0.0], device=self.device).repeat(self.num_envs, 1)
-        forward_world = quat_rotate(self.base_quat, forward_local)
+        """CRITICAL PENALTY: Ball passed behind the robot's INITIAL position (goalkeeper failed)."""
+        # Use initial robot forward direction (robot can't cheat by turning)
+        forward_world = self.initial_robot_forward
         
-        # Vector from robot to ball
-        robot_to_ball = self.ball_pos[:, :2] - self.base_pos[:, :2]
+        # Vector from INITIAL robot position to ball
+        robot_to_ball = self.ball_pos[:, :2] - self.initial_robot_pos[:, :2]
         
-        # Dot product: negative means ball is behind robot
+        # Dot product: negative means ball is behind initial robot position
         ball_behind_robot = torch.sum(robot_to_ball * forward_world[:, :2], dim=-1)
         
         # Threshold from config (how far behind counts as "passed")
         threshold = self.cfg.get("goalkeeper", {}).get("ball_passed_x_threshold", -0.5)
         
-        # Penalty if ball is behind robot
+        # Penalty if ball is behind initial robot position
         passed = ball_behind_robot < threshold
         
         return passed.float()
     
     def _reward_ball_shot_back(self):
-        """One-time reward for shooting ball back (positive X velocity after blocking)."""
+        """One-time reward for shooting ball in INITIAL forward direction (goalkeeper returns ball)."""
         # Ball velocity (world frame)
-        ball_vel_x = self.root_states[:, 1, 7]  # X velocity (positive = forward/away)
-        ball_speed = torch.norm(self.root_states[:, 1, 7:9], dim=-1)
+        ball_vel_world = self.root_states[:, 1, 7:10]
+        ball_speed = torch.norm(ball_vel_world, dim=-1)
+        
+        # Check if ball is moving in initial forward direction (not current robot direction)
+        # Dot product of ball velocity with initial forward direction
+        vel_in_forward_dir = torch.sum(ball_vel_world * self.initial_robot_forward, dim=-1)
         
         # Only reward once when:
-        # 1. Ball has positive X velocity (going forward/away from robot)
+        # 1. Ball is moving in initial forward direction (positive dot product)
         # 2. Ball is moving fast enough
         # 3. Ball was touched/blocked first
         # 4. Haven't already rewarded this
         min_speed = self.cfg["rewards"].get("shot_back_min_speed", 0.5)
         
-        is_positive_x = ball_vel_x > 0
+        is_forward = vel_in_forward_dir > 0.5  # Require significant forward component
         is_fast = ball_speed > min_speed
         was_touched = self.blocked_ball_buffer
         not_yet_rewarded = ~self.ball_shot_back
         
         # Check if should reward now
-        should_reward = is_positive_x & is_fast & was_touched & not_yet_rewarded
+        should_reward = is_forward & is_fast & was_touched & not_yet_rewarded
         
         # Mark as rewarded (one-time only)
         self.ball_shot_back = self.ball_shot_back | should_reward
@@ -1505,19 +1538,18 @@ class BallInterceptK1(BaseTask):
         return should_reward.float()
     
     def _reward_directional_return(self):
-        """Dense reward for post-contact ball velocity toward goal (time-windowed).
-        This rewards intentional strikes, not just random bounces."""
+        """Dense reward for post-contact ball velocity in INITIAL forward direction (time-windowed).
+        This rewards shooting the ball back where it came from, not just in current robot direction."""
         # Only reward within time window after contact (e.g., 0.5s)
         time_window = self.cfg["rewards"].get("return_time_window_s", 2.0)
         within_window = self.time_since_contact < time_window
         had_contact_recently = self.time_since_contact > 0.0  # Some contact happened
         
-        # Ball velocity in robot frame
+        # Ball velocity in world frame
         ball_vel_world = self.root_states[:, 1, 7:10]
-        ball_vel_local = quat_rotate_inverse(self.base_quat, ball_vel_world)
         
-        # Desired direction: forward (positive X in robot frame)
-        vel_forward = ball_vel_local[:, 0]
+        # Project ball velocity onto initial forward direction
+        vel_forward = torch.sum(ball_vel_world * self.initial_robot_forward, dim=-1)
         
         # Reward positive forward velocity, scaled by speed
         # Clamp to reasonable max (e.g., 3 m/s)
@@ -1553,32 +1585,85 @@ class BallInterceptK1(BaseTask):
         return -(softness * weight)
 
     def _reward_ball_lateral_vel(self):
-        """Penalty for ball moving sideways (Y-axis) instead of forward."""
-        
+        """Penalty for ball moving sideways relative to INITIAL forward direction."""
         ball_vel_world = self.root_states[:, 1, 7:10]
-        ball_vel_local = quat_rotate_inverse(self.base_quat, ball_vel_world)
-        
-        # We want to penalize Y velocity (sideways)
-        vel_y = torch.abs(ball_vel_local[:, 1])
+        ball_speed = torch.norm(ball_vel_world, dim=-1)
         
         # Only penalize if ball is moving reasonably fast (don't punish jitter)
-        ball_speed = torch.norm(ball_vel_local, dim=-1)
         is_moving = ball_speed > 0.1
         
-        return vel_y * is_moving.float()
+        # Project velocity onto initial forward direction
+        vel_forward = torch.sum(ball_vel_world * self.initial_robot_forward, dim=-1)
+        
+        # Calculate lateral velocity (perpendicular to forward direction)
+        # lateral_vel = total_vel - forward_component
+        vel_forward_vec = vel_forward.unsqueeze(-1) * self.initial_robot_forward
+        vel_lateral_vec = ball_vel_world - vel_forward_vec
+        vel_lateral = torch.norm(vel_lateral_vec, dim=-1)
+        
+        return vel_lateral * is_moving.float()
 
     def _reward_ball_forward_vel(self):
-        """Dense reward for ball moving forward (positive X in local frame)."""
+        """Dense reward for ball moving in INITIAL forward direction."""
         ball_vel_world = self.root_states[:, 1, 7:10]
-        ball_vel_local = quat_rotate_inverse(self.base_quat, ball_vel_world)
-
-        vel_x = ball_vel_local[:, 0]
-        return torch.clamp(vel_x, min=0.0)
+        
+        # Project velocity onto initial forward direction
+        vel_forward = torch.sum(ball_vel_world * self.initial_robot_forward, dim=-1)
+        
+        return torch.clamp(vel_forward, min=0.0)
 
     def _reward_goalkeeper_pos(self):
         """Reward for being close to the calculated defense target (Intercept or Center)."""
         # Distance to calculated target
         dist = torch.norm(self.base_pos[:, :2] - self.goalkeeper_target, dim=-1)
         
-        # Dense reward for getting closer
-        return torch.exp(-torch.square(dist) / 0.5)
+        # Dense reward for being close (exponential decay)
+        # Use smaller sigma for more focused reward near target
+        proximity_reward = torch.exp(-torch.square(dist) / 0.2)
+        
+        return proximity_reward
+    
+    def _reward_move_to_intercept(self):
+        """Reward for actively moving toward the intercept position."""
+        # Current distance to target
+        dist = torch.norm(self.base_pos[:, :2] - self.goalkeeper_target, dim=-1)
+        
+        # Calculate velocity toward target (distance reduction per timestep)
+        # Positive = getting closer, negative = moving away
+        dist_change = self.prev_dist_to_target - dist
+        
+        # Update previous distance for next step
+        self.prev_dist_to_target[:] = dist
+        
+        # Reward for reducing distance (approaching target)
+        # Scale by dt to make it independent of simulation frequency
+        velocity_reward = dist_change / self.dt
+        
+        # Only reward positive velocity (moving toward target), clip negative
+        return torch.clamp(velocity_reward, min=0.0)
+    
+    def _reward_intercept_urgency(self):
+        """Extra reward when ball is close and moving toward robot - encourages urgent action."""
+        ball_pos = self.ball_pos
+        ball_vel = self.root_states[:, 1, 7:10]
+        
+        # Check if ball is approaching (negative X velocity)
+        is_approaching = ball_vel[:, 0] < -0.2
+        
+        # Distance to ball
+        dist_to_ball = torch.norm(ball_pos[:, :2] - self.base_pos[:, :2], dim=-1)
+        
+        # Distance to intercept target
+        dist_to_target = torch.norm(self.base_pos[:, :2] - self.goalkeeper_target, dim=-1)
+        
+        # Urgency increases as ball gets closer (within 2m range)
+        urgency = torch.clamp(1.0 - dist_to_ball / 2.0, min=0.0)
+        
+        # Penalty if not close to intercept position when ball is near
+        # This creates pressure to move quickly when ball approaches
+        intercept_readiness = torch.exp(-torch.square(dist_to_target) / 0.2)
+        
+        # Only apply when ball is actually approaching
+        reward = urgency * intercept_readiness * is_approaching.float()
+        
+        return reward
