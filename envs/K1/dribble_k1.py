@@ -138,7 +138,8 @@ class DribbleK1(BaseTask):
             self.gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
 
             # Create ball actor
-            ball_asset = self._create_ball_asset(radius=apply_randomization(self.cfg["ball"]["radius"], self.cfg["randomization"].get("ball_radius")))
+            self.ball_radii = apply_randomization(self.cfg["ball"]["radius"], self.cfg["randomization"].get("ball_radius"))
+            ball_asset = self._create_ball_asset(radius=self.ball_radii)
             ball_handle = self.gym.create_actor(env_handle, ball_asset, start_pose, "ball", i, True, 0)
             try:
                 ball_body_props = self.gym.get_actor_rigid_body_properties(env_handle, ball_handle)
@@ -290,8 +291,8 @@ class DribbleK1(BaseTask):
         # initialize some data used later on
         self.common_step_counter = 0
         self.gravity_vec = to_torch(get_axis_params(-1.0, self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
-        self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device)
-        self.last_actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device)
+        self.actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
+        self.last_actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 0, 7:13])
         self.last_dof_targets = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
@@ -300,6 +301,7 @@ class DribbleK1(BaseTask):
         self.commands = torch.zeros(self.num_envs, self.cfg["commands"]["num_commands"], dtype=torch.float, device=self.device)
         self.cmd_resample_time = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.gait_frequency_offset = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.gait_process = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.base_lin_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 0, 7:10])
         self.base_ang_vel = quat_rotate_inverse(self.base_quat, self.root_states[:, 0, 10:13])
@@ -500,21 +502,13 @@ class DribbleK1(BaseTask):
         if len(env_ids) == 0:
             return
         
-        # Sample gait frequency
-        self.commands[env_ids, 0] = torch_rand_float(
-            self.cfg["commands"]["gait_frequency"][0], self.cfg["commands"]["gait_frequency"][1], (len(env_ids), 1), device=self.device
-        ).squeeze(1)
-        
         # Sample ball target direction (unit vector in robot local frame)
         # Sample angle uniformly and convert to unit vector
         target_angles = torch_rand_float(-torch.pi, torch.pi, (len(env_ids), 1), device=self.device).squeeze(1)
-        self.commands[env_ids, 1] = torch.cos(target_angles)  # ball_target_dir_x
-        self.commands[env_ids, 2] = torch.sin(target_angles)  # ball_target_dir_y
+        speed = apply_randomization(torch.zeros(len(env_ids), 1, dtype=torch.float, device=self.device), self.cfg["randomization"].get("ball_target_speed"))
+        self.commands[env_ids, 0] = torch.cos(target_angles) * speed.squeeze(1)  # ball_target_dir_x
+        self.commands[env_ids, 1] = torch.sin(target_angles) * speed.squeeze(1)  # ball_target_dir_y
             
-        self.gait_frequency[env_ids] = self.commands[env_ids, 0]
-        still_envs = env_ids[torch.randperm(len(env_ids))[: int(self.cfg["commands"]["still_proportion"] * len(env_ids))]]
-        self.commands[still_envs, 0] = 0.0
-        self.gait_frequency[still_envs] = 0.0
         self.cmd_resample_time[env_ids] += torch.randint(
             int(self.cfg["commands"]["resampling_time_s"][0] / self.dt),
             int(self.cfg["commands"]["resampling_time_s"][1] / self.dt),
@@ -528,28 +522,19 @@ class DribbleK1(BaseTask):
         current_time = self.common_step_counter * self.dt
         phase_time = current_time % cycle_duration
         
-        # Determine which phase we're in (0-3)
-        phase = int(phase_time // 3.0)
+        # Determine which phase we're in (0-2)
+        phase = int(phase_time // 2.0)
         phase = 0
         
         # Reset commands
         self.commands[:, :] = 0.0
         
         if phase == 0:
-            # Forward: 3 sec with lin_vel_x = 0.7
-            self.commands[:, 0] = 0.5
-            self.gait_frequency[:] = 1.0
+            self.commands[:, 0] = 1.0
         elif phase == 1:
-            # Sideways: 3 sec with lin_vel_y = 0.3
-            self.commands[:, 1] = 0.3
-            self.gait_frequency[:] = 1.5
+            self.commands[:, 0] = 1.0
         elif phase == 2:
-            # Turning: 3 sec with ang_vel_yaw = 0.3
-            self.commands[:, 2] = 0.3
-            self.gait_frequency[:] = 1.5
-        else:
-            # Still: 3 sec with all zeros
-            self.gait_frequency[:] = 0.0
+            self.commands[:, 1] = 1.0
 
     def _update_curriculum(self, env_ids):
         # Curriculum not used for dribbling task with pre-trained walking model
@@ -561,6 +546,9 @@ class DribbleK1(BaseTask):
 
     def step(self, actions):
         # pre physics step
+        self.gait_frequency_offset = torch.clamp(actions[:, 12], -0.5, 0.5)
+        self.gait_frequency[:] = self.gait_frequency_offset + 2.0
+        actions = actions[:, :12]
         self.actions[:] = torch.clip(actions, -self.cfg["normalization"]["clip_actions"], self.cfg["normalization"]["clip_actions"])
         dof_targets = self.default_dof_pos + self.cfg["control"]["action_scale"] * self.actions
 
@@ -634,6 +622,9 @@ class DribbleK1(BaseTask):
             self.ball_ang_vel[ball_only_reset_env_ids] = 0.0
             self.reset_ball_buf[ball_only_reset_env_ids] = False
 
+        if self.is_play:
+            self._draw_debug_lines()
+
         self._compute_reward()
         
         # Update last_ball_lin_vel_world before potential full reset
@@ -649,8 +640,6 @@ class DribbleK1(BaseTask):
         self._resample_commands()
 
         self._compute_observations()
-
-        self._draw_debug_lines()
 
         self.last_actions[:] = self.actions
         self.last_dof_vel[:] = self.dof_vel
@@ -675,8 +664,8 @@ class DribbleK1(BaseTask):
             
             # Get target direction (unit vector) - treating as world frame
             target_dir = np.array([
-                self.commands[env_idx, 1].cpu().numpy(),  # ball_target_dir_x
-                self.commands[env_idx, 2].cpu().numpy(),  # ball_target_dir_y
+                self.commands[env_idx, 0].cpu().numpy(),  # ball_target_dir_x
+                self.commands[env_idx, 1].cpu().numpy(),  # ball_target_dir_y
                 0.0  # Keep on horizontal plane
             ], dtype=np.float32)
             
@@ -788,18 +777,6 @@ class DribbleK1(BaseTask):
     def _compute_observations(self):
         """Computes observations for dribbling with pre-trained walking model.
         
-        Observation structure (51 total):
-        - projected_gravity (3)
-        - base_ang_vel (3)
-        - gait_frequency command (1)
-        - ball_target_direction command (2) - converted to robot local frame for observation
-        - relative_ball_pos current (2) - ball position in robot frame
-        - last_relative_ball_pos (2) - ball position from last frame
-        - gait_process cos/sin (2)
-        - dof_pos - default_dof_pos (12)
-        - dof_vel (12)
-        - actions (12)
-        
         Note: Commands are stored in world coordinates, but target direction is
         converted to robot's local frame for the observation.
         """
@@ -811,8 +788,8 @@ class DribbleK1(BaseTask):
         # Convert target direction from world frame to robot local frame for observation
         # Commands[:, 1:3] stores target direction in world coordinates
         _, _, base_yaw = get_euler_xyz(self.base_quat)
-        world_dir_x = self.commands[:, 1]
-        world_dir_y = self.commands[:, 2]
+        world_dir_x = self.commands[:, 0]
+        world_dir_y = self.commands[:, 1]
         # Rotate by -yaw to convert to local frame
         cos_yaw = torch.cos(base_yaw)
         sin_yaw = torch.sin(base_yaw)
@@ -822,7 +799,6 @@ class DribbleK1(BaseTask):
         # Commands scale: gait_frequency (1), ball_target_dir_x (1), ball_target_dir_y (1)
         commands_scale = torch.tensor(
             [
-                self.cfg["normalization"]["gait_frequency"],    # 0: gait_frequency
                 self.cfg["normalization"]["ball_target_vel"],   # 1: ball_target_dir_x (unit vector, no scaling needed)
                 self.cfg["normalization"]["ball_target_vel"],   # 2: ball_target_dir_y (unit vector, no scaling needed)
             ],
@@ -831,7 +807,6 @@ class DribbleK1(BaseTask):
         
         # Build command observation with local frame target direction
         commands_obs = torch.stack([
-            self.commands[:, 0],  # gait_frequency (not affected by frame)
             local_target_dir_x,   # target direction x in local frame
             local_target_dir_y,   # target direction y in local frame
         ], dim=-1)
@@ -842,10 +817,11 @@ class DribbleK1(BaseTask):
                 apply_randomization(self.projected_gravity, self.cfg["noise"].get("gravity")) * self.cfg["normalization"]["gravity"],  # 3
                 apply_randomization(self.base_ang_vel, self.cfg["noise"].get("ang_vel")) * self.cfg["normalization"]["ang_vel"],  # 3
                 # Commands: gait_frequency + ball target direction (in local frame)
-                commands_obs * commands_scale,  # 3 (gait_freq, target_dir_x_local, target_dir_y_local)
+                commands_obs * commands_scale,  # 2 (target_dir_x_local, target_dir_y_local)
                 # Ball observations
                 apply_randomization(current_relative_ball_pos_xy, self.cfg["noise"].get("ball_pos")) * self.cfg["normalization"]["ball_pos"],  # 2
                 self.last_relative_ball_pos * self.cfg["normalization"]["ball_pos"],  # 2
+                self.gait_frequency_offset.unsqueeze(-1) * self.cfg["normalization"]["gait_frequency_offset"],  # 1
                 # 3x zeros to fill up to 54 observations
                 torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device),
                 # Gait process (same as walking model)
@@ -1151,81 +1127,73 @@ class DribbleK1(BaseTask):
         return feet_x_offset
 
     # ------------ ball reward functions ----------------
+
     def _reward_ball_velocity_tracking(self):
-        """Rewards tracking target ball velocity (combined x and y)"""
+        """
+        Rewards ball velocity tracking using cosine similarity (direction) + magnitude matching.
+        
+        Output range: -1 to +1
+          +1 = perfect direction AND perfect speed
+          0  = perpendicular movement or stationary ball
+          -1 = opposite direction with matching speed
+        
+        Config parameters:
+          - ball_vel_tracking_sigma: controls sensitivity of speed matching (default: 1.0)
+          - ball_vel_tracking_min_speed: minimum ball speed for reward (default: 0.1)
+        """
         ball_vel_world = self.body_states[:, -1, 7:10]  # Ball velocity in world frame
-        target_vel = self.commands[:, 0:2]  # Use commands 0,1 as target ball velocity (x, y)
+        actual_vel = ball_vel_world[:, 0:2]  # XY velocity
+        target_vel = self.commands[:, 0:2]   # Target XY velocity
         
-        # Check if ball is moving (magnitude of ball velocity)
-        ball_speed = torch.norm(ball_vel_world[:, 0:2], dim=-1)
-        min_speed_threshold = self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
+        # Calculate speeds
+        actual_speed = torch.norm(actual_vel, dim=-1)
+        target_speed = torch.norm(target_vel, dim=-1)
         
-        # Zero reward when ball is not moving
-        is_moving = ball_speed > min_speed_threshold
+        # Cosine similarity: measures direction alignment
+        # Range: -1 (opposite) to +1 (aligned)
+        dot_product = torch.sum(actual_vel * target_vel, dim=-1)
+        cos_sim = dot_product / (actual_speed * target_speed + 1e-8)
         
-        # Calculate velocity error in XY plane
-        vel_error = torch.norm(ball_vel_world[:, 0:2] - target_vel, dim=-1)
+        # Speed matching: exponential reward for matching target speed
+        # Range: 0 (very different) to 1 (perfect match)
+        sigma = self.cfg["rewards"].get("ball_vel_tracking_sigma", 1.0)
+        speed_error = torch.abs(actual_speed - target_speed)
+        speed_reward = torch.exp(-speed_error / sigma)
         
-        # Exponential reward (closer to target = higher reward)
-        sigma = self.cfg["rewards"].get("ball_vel_tracking_sigma", 10.0)
-        reward = torch.exp(-vel_error / sigma)
+        # Combined reward: direction * speed_match
+        # Range: -1 (opposite dir, good speed) to +1 (aligned, good speed)
+        reward = cos_sim * speed_reward
         
-        # Zero reward when ball is not moving
-        reward = reward * is_moving.float()
-        return reward
-
-    def _reward_ball_velocity_tracking_x(self):
-        """Rewards tracking target ball velocity in x-axis"""
-        ball_vel_world = self.body_states[:, -1, 7:10]  # Ball velocity in world frame
-        target_vel_x = self.commands[:, 1]  # Target x component from ball_target_dir_x
+        # Zero reward when ball is not moving (avoids noise from stationary ball)
+        min_speed = self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
+        is_moving = actual_speed > min_speed
         
-        # Check if ball is moving (magnitude of ball velocity)
-        ball_speed = torch.norm(ball_vel_world[:, 0:2], dim=-1)
-        min_speed_threshold = self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
+        # Zero reward when no target is commanded
+        has_target = target_speed > 1e-6
         
-        # Zero reward when ball is not moving
-        is_moving = ball_speed > min_speed_threshold
-        
-        # Calculate velocity error in x-axis only
-        vel_error_x = torch.abs(ball_vel_world[:, 0] - target_vel_x)
-        
-        # Exponential reward (closer to target = higher reward)
-        sigma = self.cfg["rewards"].get("ball_vel_tracking_sigma", 10.0)
-        reward = torch.exp(-vel_error_x / sigma)
-        
-        # Zero reward when ball is not moving
-        reward = reward * is_moving.float()
-        return reward
-
-    def _reward_ball_velocity_tracking_y(self):
-        """Rewards tracking target ball velocity in y-axis"""
-        ball_vel_world = self.body_states[:, -1, 7:10]  # Ball velocity in world frame
-        target_vel_y = self.commands[:, 2]  # Target y component from ball_target_dir_y
-        
-        # Check if ball is moving (magnitude of ball velocity)
-        ball_speed = torch.norm(ball_vel_world[:, 0:2], dim=-1)
-        min_speed_threshold = self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
-        
-        # Zero reward when ball is not moving
-        is_moving = ball_speed > min_speed_threshold
-        
-        # Calculate velocity error in y-axis only
-        vel_error_y = torch.abs(ball_vel_world[:, 1] - target_vel_y)
-        
-        # Exponential reward (closer to target = higher reward)
-        sigma = self.cfg["rewards"].get("ball_vel_tracking_sigma", 10.0)
-        reward = torch.exp(-vel_error_y / sigma)
-        
-        # Zero reward when ball is not moving
-        reward = reward * is_moving.float()
+        reward = reward * is_moving.float() * has_target.float()
         return reward
 
     def _reward_ball_distance_penalty(self):
         """Penalizes distance from robot to ball"""
         robot_pos = self.base_pos[:, 0:2]  # Robot XY position
         ball_pos = self.ball_pos[:, 0:2]    # Ball XY position
-        
-        distance = torch.norm(ball_pos - robot_pos, dim=-1)
+
+        # target pos is 10 cm behind ball in the direction of the ball's velocity
+        command_norm = torch.norm(self.commands[:, :2], dim=-1, keepdim=True)
+        # Prevent division by zero by adding small epsilon
+        normed_commands = self.commands[:, :2] / (command_norm + 1e-8)
+        target_pos = ball_pos -(0.1 + self.ball_radii) * normed_commands
+
+        # visualize target pos via a red line from ball to target pos
+        z_coords = np.full(ball_pos.shape[0], 0.2, dtype=np.float32)
+        colors = np.array([1.0, 0.0, 0.0], dtype=np.float32)
+        if self.is_play:
+            for env_idx in range(self.num_envs):
+                vertices = np.array([ball_pos[env_idx, 0].cpu().numpy(), ball_pos[env_idx, 1].cpu().numpy(), 0.2, target_pos[env_idx, 0].cpu().numpy(), target_pos[env_idx, 1].cpu().numpy(), 0.2], dtype=np.float32)
+                self.gym.add_lines(self.viewer, self.envs[env_idx], 1, vertices, colors)
+            
+        distance = torch.norm(target_pos - robot_pos, dim=-1)
         distance = torch.clamp(distance, min=0.0, max=self.cfg["rewards"].get("max_ball_distance", 3.0))
         
         # Exponential penalty (closer = less penalty)
