@@ -51,7 +51,7 @@ viewer:
   pos: [3., -3., 2.]  # [m]
   lookat: [15., 0., 0.]  # [m]
   record_video: true  # only in play
-  record_interval: 30.  # [s]
+  record_interval: 60.  # [s]
   record_env_idx: 0
 
 algorithm:
@@ -339,26 +339,28 @@ rewards:
     # === Baseline rewards (keep robot alive and stable) ===
     survival: 0.1               # Skaliert: Überleben alleine ist nicht genug
     base_height: -1.0            # Skaliert
-    orientation: -0.8            # Skaliert
+    orientation: -1.0           # Skaliert
     
     # === Regularization (smooth movement) ===
     torques: -2.e-5              # Skaliert
     power: -2.e-4                # Skaliert
-    lin_vel_z: -0.4              # Skaliert
-    ang_vel_xy: -0.02            # Skaliert
+    lin_vel_z: -0.25             # Skaliert (reduced to allow movement)
+    ang_vel_xy: -0.01            # Skaliert (reduced to allow turning)
     dof_vel: -5.e-5              # Skaliert
     dof_acc: -1.e-8              # Skaliert
     root_acc: -0.5e-5             # Skaliert
-    action_rate: -0.08           # Skaliert
+    action_rate: -0.04           # Skaliert (reduced to allow exploration)
     dof_pos_limits: -0.1         # Skaliert
     collision: -0.2              # Skaliert
     feet_slip: -0.05             # Skaliert
-    feet_distance: -0.3          # Skaliert
+    feet_distance: -0.3          # Skaliert (reduced to avoid freezing)
+
+    feet_ground_contact: -0.2    # Penalize only full airborne, keep mild
     
     # === MAIN GOAL: Block ball (DON'T let it pass!) ===
     ball_passed_robot: -5.0      # Skaliert: Kritisches Versagen
-    goalkeeper_pos: 0.5          # Skaliert
-    move_to_intercept: 0.8       # Skaliert
+    goalkeeper_pos: 1.2          # Skaliert (stronger position guidance)
+    move_to_intercept: 2.5       # Skaliert (stronger movement incentive)
     facing_ball: 0.1             # Skaliert
     
     # === Ball wegschießen (HAUPTZIEL!) ===
@@ -380,7 +382,7 @@ rewards:
     feet_roll: 0.
     waiting: 0.
 
-  episode_length_s: 6.0           # Short episode for blocking task
+  episode_length_s: 8.0           # Short episode for blocking task
   terminate_height: 0.30
   terminate_lin_vel: 10.0  # Linear velocity limit in m/s
   terminate_ang_vel: 20.0  # Angular velocity limit in rad/s
