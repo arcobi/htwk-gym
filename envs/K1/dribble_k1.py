@@ -149,14 +149,26 @@ class DribbleK1(BaseTask):
             except Exception:
                 pass
 
-            # Set ball shape properties: restitution/friction
+            # Set ball shape properties: restitution/friction (with randomization)
             try:
                 ball_shape_props = self.gym.get_actor_rigid_shape_properties(env_handle, ball_handle)
                 for s in range(len(ball_shape_props)):
-                    ball_shape_props[s].restitution = self.cfg["ball"].get("restitution", 0.1)
-                    ball_shape_props[s].friction = self.cfg["ball"].get("friction", 1.0)
-                    ball_shape_props[s].rolling_friction = self.cfg["ball"].get("rolling_friction", 0.3)
-                    ball_shape_props[s].torsion_friction = self.cfg["ball"].get("torsion_friction", 0.1)
+                    ball_shape_props[s].restitution = apply_randomization(
+                        self.cfg["ball"].get("restitution", 0.1), 
+                        self.cfg["randomization"].get("ball_restitution")
+                    )
+                    ball_shape_props[s].friction = apply_randomization(
+                        self.cfg["ball"].get("friction", 1.0),
+                        self.cfg["randomization"].get("ball_friction")
+                    )
+                    ball_shape_props[s].rolling_friction = apply_randomization(
+                        self.cfg["ball"].get("rolling_friction", 0.3),
+                        self.cfg["randomization"].get("ball_rolling_friction")
+                    )
+                    ball_shape_props[s].torsion_friction = apply_randomization(
+                        self.cfg["ball"].get("torsion_friction", 0.1),
+                        self.cfg["randomization"].get("ball_torsion_friction")
+                    )
                     ball_shape_props[s].thickness = 0.01
                     ball_shape_props[s].contact_offset = 0.02
                     ball_shape_props[s].rest_offset = 0.0
@@ -211,7 +223,10 @@ class DribbleK1(BaseTask):
         """Create a ball asset with the given radius"""
         ball_options = gymapi.AssetOptions()
         ball_options.fix_base_link = False
-        ball_options.density = self.cfg["ball"].get("density", 200)
+        ball_options.density = apply_randomization(
+            self.cfg["ball"].get("density", 200),
+            self.cfg["randomization"].get("ball_density")
+        )
         ball_options.angular_damping = 0.15
         ball_options.linear_damping = 0.38
         ball_options.max_angular_velocity = 1000.0
@@ -325,6 +340,15 @@ class DribbleK1(BaseTask):
         self.reset_ball_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)  # Buffer for ball-only resets
         self.last_ball_lin_vel_world = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)  # World frame
         self.last_relative_ball_pos = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Last frame ball position in robot frame
+        
+        # Ball detection simulation (simulates camera at 30 FPS with jitter)
+        # Stores ball positions in ROBOT FRAME - only updates when detection occurs
+        self.ball_detection_fps = self.cfg["ball"].get("detection_fps", 30.0)
+        self.ball_detection_jitter = self.cfg["ball"].get("detection_fps_jitter", 0.15)
+        self.ball_detection_interval = 1.0 / self.ball_detection_fps  # Base interval in seconds
+        self.perceived_ball_pos_relative = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Current detection (in robot frame)
+        self.last_perceived_ball_pos_relative = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Previous detection (in robot frame)
+        self.ball_detection_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # Time until next detection
         self.feet_roll = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
         self.feet_yaw = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
         self.feet_yaw_rel = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
@@ -385,6 +409,17 @@ class DribbleK1(BaseTask):
         self.cmd_resample_time[env_ids] = 0
         self.last_ball_lin_vel_world[env_ids] = 0.0  # Reset ball velocity tracking
         self.last_relative_ball_pos[env_ids] = 0.0  # Reset last ball position buffer
+        
+        # Reset ball detection simulation - randomize initial timer for each env
+        self.ball_detection_timer[env_ids] = torch_rand_float(
+            0.0, self.ball_detection_interval, (len(env_ids), 1), device=self.device
+        ).squeeze(-1)
+        # Compute initial ball position in robot frame for reset envs (with detection noise)
+        ball_pos_world_frame = self.ball_pos[env_ids] - self.base_pos[env_ids]
+        relative_ball_pos = quat_rotate_inverse(self.base_quat[env_ids], ball_pos_world_frame)
+        noisy_relative_xy = apply_randomization(relative_ball_pos[:, 0:2], self.cfg["noise"].get("ball_pos"))
+        self.perceived_ball_pos_relative[env_ids] = noisy_relative_xy
+        self.last_perceived_ball_pos_relative[env_ids] = noisy_relative_xy
 
         self.delay_steps[env_ids] = torch.randint(0, self.cfg["control"]["decimation"], (len(env_ids),), device=self.device)
         self.extras["time_outs"] = self.time_out_buf
@@ -464,8 +499,30 @@ class DribbleK1(BaseTask):
         identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids_to_reset_ball), 1)
         self.root_states[env_ids_to_reset_ball, 1, 3:7] = identity_quat
         
-        # Set ball linear and angular velocities to zero
-        self.root_states[env_ids_to_reset_ball, 1, 7:13] = 0.0
+        # Set ball linear velocity with randomization
+        self.root_states[env_ids_to_reset_ball, 1, 7] = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_lin_vel_x")
+        )
+        self.root_states[env_ids_to_reset_ball, 1, 8] = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_lin_vel_y")
+        )
+        self.root_states[env_ids_to_reset_ball, 1, 9] = 0.0  # z velocity stays zero
+        
+        # Set ball angular velocity with randomization
+        self.root_states[env_ids_to_reset_ball, 1, 10] = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_ang_vel_x")
+        )
+        self.root_states[env_ids_to_reset_ball, 1, 11] = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_ang_vel_y")
+        )
+        self.root_states[env_ids_to_reset_ball, 1, 12] = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_ang_vel_z")
+        )
 
     def _teleport_robot(self):
         if self.terrain.type == "plane":
@@ -578,6 +635,9 @@ class DribbleK1(BaseTask):
         self.ball_pos[:] = self.root_states[:, 1, 0:3]
         self.ball_lin_vel[:] = self.body_states[:, -1, 7:10]
         self.ball_ang_vel[:] = self.body_states[:, -1, 10:13]
+        
+        # Update ball detection simulation (30 FPS camera with jitter)
+        self._update_ball_detection()
 
         # Update robot state tensors
         self.base_pos[:] = self.root_states[:, 0, 0:3]
@@ -620,6 +680,15 @@ class DribbleK1(BaseTask):
             self.ball_rot[ball_only_reset_env_ids] = self.root_states[ball_only_reset_env_ids, 1, 3:7]
             self.ball_lin_vel[ball_only_reset_env_ids] = 0.0
             self.ball_ang_vel[ball_only_reset_env_ids] = 0.0
+            # Reset ball detection state for ball-only resets (with detection noise)
+            ball_pos_world_frame = self.ball_pos[ball_only_reset_env_ids] - self.base_pos[ball_only_reset_env_ids]
+            relative_ball_pos = quat_rotate_inverse(self.base_quat[ball_only_reset_env_ids], ball_pos_world_frame)
+            noisy_relative_xy = apply_randomization(relative_ball_pos[:, 0:2], self.cfg["noise"].get("ball_pos"))
+            self.perceived_ball_pos_relative[ball_only_reset_env_ids] = noisy_relative_xy
+            self.last_perceived_ball_pos_relative[ball_only_reset_env_ids] = noisy_relative_xy
+            self.ball_detection_timer[ball_only_reset_env_ids] = torch_rand_float(
+                0.0, self.ball_detection_interval, (len(ball_only_reset_env_ids), 1), device=self.device
+            ).squeeze(-1)
             self.reset_ball_buf[ball_only_reset_env_ids] = False
 
         if self.is_play:
@@ -689,14 +758,14 @@ class DribbleK1(BaseTask):
 
     def _kick_robots(self):
         """Random kick the robots. Emulates an impulse by setting a randomized base velocity."""
-        if self.common_step_counter % np.ceil(self.cfg["randomization"]["kick_interval_s"] / self.dt) == 0:
+        if self.common_step_counter % np.ceil(apply_randomization(0.0, self.cfg["randomization"].get("kick_interval_s")) / self.dt) == 0:
             self.root_states[:, 0, 7:10] = apply_randomization(self.root_states[:, 0, 7:10], self.cfg["randomization"].get("kick_lin_vel"))
             self.root_states[:, 0, 10:13] = apply_randomization(self.root_states[:, 0, 10:13], self.cfg["randomization"].get("kick_ang_vel"))
             self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self.root_states))
 
     def _push_robots(self):
         """Random push the robots. Emulates an impulse by setting a randomized force."""
-        if self.common_step_counter % np.ceil(self.cfg["randomization"]["push_interval_s"] / self.dt) == 0:
+        if self.common_step_counter % np.ceil(apply_randomization(0.0, self.cfg["randomization"].get("push_interval_s")) / self.dt) == 0:
             self.pushing_forces[:, self.base_indice, :] = apply_randomization(
                 torch.zeros_like(self.pushing_forces[:, 0, :]),
                 self.cfg["randomization"].get("push_force"),
@@ -705,7 +774,7 @@ class DribbleK1(BaseTask):
                 torch.zeros_like(self.pushing_torques[:, 0, :]),
                 self.cfg["randomization"].get("push_torque"),
             )
-        elif self.common_step_counter % np.ceil(self.cfg["randomization"]["push_interval_s"] / self.dt) == np.ceil(
+        elif self.common_step_counter % np.ceil(apply_randomization(0.0, self.cfg["randomization"].get("push_interval_s")) / self.dt) == np.ceil(
             self.cfg["randomization"]["push_duration_s"] / self.dt
         ):
             self.pushing_forces[:, self.base_indice, :].zero_()
@@ -716,6 +785,43 @@ class DribbleK1(BaseTask):
             gymtorch.unwrap_tensor(self.pushing_torques),
             gymapi.LOCAL_SPACE,
         )
+
+    def _update_ball_detection(self):
+        """
+        Simulates ball detection at ~30 FPS with jitter.
+        Updates perceived_ball_pos_relative and last_perceived_ball_pos_relative when detection timer expires.
+        Both positions are stored in robot frame and only change when a new detection occurs.
+        Detection noise is applied once at detection time (not every policy step).
+        """
+        # Decrement detection timer
+        self.ball_detection_timer -= self.dt
+        
+        # Find environments where detection should occur (timer expired)
+        detect_mask = self.ball_detection_timer <= 0
+        
+        if detect_mask.any():
+            detect_ids = detect_mask.nonzero(as_tuple=False).flatten()
+            
+            # Compute current ball position in robot frame for detected envs
+            ball_pos_world_frame = self.ball_pos[detect_ids] - self.base_pos[detect_ids]
+            relative_ball_pos = quat_rotate_inverse(self.base_quat[detect_ids], ball_pos_world_frame)
+            current_relative_xy = relative_ball_pos[:, 0:2]
+            
+            # Apply detection noise (sampled once per detection, stays constant until next detection)
+            current_relative_xy = apply_randomization(current_relative_xy, self.cfg["noise"].get("ball_pos"))
+            
+            # Shift current to last (previous detection becomes "last")
+            self.last_perceived_ball_pos_relative[detect_ids] = self.perceived_ball_pos_relative[detect_ids].clone()
+            
+            # Update current perceived position (in robot frame, with noise baked in)
+            self.perceived_ball_pos_relative[detect_ids] = current_relative_xy
+            
+            # Reset detection timer with randomized interval
+            jitter_scale = 1.0 + torch_rand_float(
+                -self.ball_detection_jitter, self.ball_detection_jitter, 
+                (len(detect_ids), 1), device=self.device
+            ).squeeze(-1)
+            self.ball_detection_timer[detect_ids] = self.ball_detection_interval * jitter_scale
 
     def _refresh_feet_state(self):
         self.feet_pos[:] = self.body_states[:, self.feet_indices, 0:3]
@@ -780,10 +886,9 @@ class DribbleK1(BaseTask):
         Note: Commands are stored in world coordinates, but target direction is
         converted to robot's local frame for the observation.
         """
-        # Calculate ball position relative to the robot in robot's local frame
-        ball_pos_world_frame = self.ball_pos - self.base_pos
-        relative_ball_pos = quat_rotate_inverse(self.base_quat, ball_pos_world_frame)
-        current_relative_ball_pos_xy = relative_ball_pos[:, 0:2]
+        # Use PERCEIVED ball position in robot frame (updates at ~30 FPS to simulate camera detection)
+        # Both current and last positions stay constant between detections
+        current_relative_ball_pos_xy = self.perceived_ball_pos_relative
         
         # Convert target direction from world frame to robot local frame for observation
         # Commands[:, 1:3] stores target direction in world coordinates
@@ -818,9 +923,10 @@ class DribbleK1(BaseTask):
                 apply_randomization(self.base_ang_vel, self.cfg["noise"].get("ang_vel")) * self.cfg["normalization"]["ang_vel"],  # 3
                 # Commands: gait_frequency + ball target direction (in local frame)
                 commands_obs * commands_scale,  # 2 (target_dir_x_local, target_dir_y_local)
-                # Ball observations
-                apply_randomization(current_relative_ball_pos_xy, self.cfg["noise"].get("ball_pos")) * self.cfg["normalization"]["ball_pos"],  # 2
-                self.last_relative_ball_pos * self.cfg["normalization"]["ball_pos"],  # 2
+                # Ball observations (using perceived positions from 30 FPS detection)
+                # Noise is already baked in at detection time, not applied every step
+                current_relative_ball_pos_xy * self.cfg["normalization"]["ball_pos"],  # 2
+                self.last_perceived_ball_pos_relative * self.cfg["normalization"]["ball_pos"],  # 2
                 self.gait_frequency_offset.unsqueeze(-1) * self.cfg["normalization"]["gait_frequency_offset"],  # 1
                 # 3x zeros to fill up to 54 observations
                 torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device),
