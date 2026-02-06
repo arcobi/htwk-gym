@@ -7,5 +7,5 @@ from envs.K1.base_walk_k1 import BaseWalkK1
 from envs.T1.parameter_walk import ParameterWalk
 from envs.T1.high_level_training.kicking_high_level import KickingHighLevel
 from envs.T1.high_level_training.dribble_high_level import DribbleHighLevel
-from envs.K1.dribble_k1 import DribbleK1
+from envs.K1.ball_control_k1 import BallControlK1
 

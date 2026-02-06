@@ -21,7 +21,7 @@ from envs.base_task import BaseTask
 from utils.utils import apply_randomization
 
 
-class DribbleK1(BaseTask):
+class BallControlK1(BaseTask):
 
     def __init__(self, cfg):
         super().__init__(cfg)
@@ -305,6 +305,9 @@ class DribbleK1(BaseTask):
 
         # initialize some data used later on
         self.common_step_counter = 0
+        self.debug_termination = bool(self.cfg.get("basic", {}).get("debug_termination", False))
+        self.debug_termination_interval = max(1, int(self.cfg.get("basic", {}).get("debug_termination_interval", 100)))
+        self.debug_termination_max_envs = max(1, int(self.cfg.get("basic", {}).get("debug_termination_max_envs", 5)))
         self.gravity_vec = to_torch(get_axis_params(-1.0, self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
@@ -477,14 +480,15 @@ class DribbleK1(BaseTask):
 
         robot_pos = self.root_states[env_ids_to_reset_ball, 0, 0:3]
 
-        # Sample ball placement uniformly within a disc of given radius around the robot
-        max_radius = self.cfg["ball"].get("spawn_radius", 1.5)
-        rand_uniform = torch.rand(len(env_ids_to_reset_ball), device=self.device)
-        radii = torch.sqrt(rand_uniform) * max_radius  # ensures uniform distribution over area
-        angles = torch_rand_float(-torch.pi, torch.pi, (len(env_ids_to_reset_ball), 1), device=self.device).squeeze(1)
-
-        offset_x = radii * torch.cos(angles)
-        offset_y = radii * torch.sin(angles)
+        # Sample ball placement offsets in meters from YAML randomization.
+        offset_x = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_pos_x"),
+        )
+        offset_y = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_init_pos_y"),
+        )
         ball_target_xy = robot_pos[:, 0:2] + torch.stack((offset_x, offset_y), dim=-1)
         
         # Calculate ball's target Z position (on the ground + ball radius)
@@ -510,6 +514,31 @@ class DribbleK1(BaseTask):
         )
         self.root_states[env_ids_to_reset_ball, 1, 9] = 0.0  # z velocity stays zero
         
+        ball_pos = self.root_states[env_ids_to_reset_ball, 1, 0:3]
+        base_pos = self.root_states[env_ids_to_reset_ball, 0, 0:3]
+        ball_base_diff = ball_pos - base_pos
+        ball_base_diff[:, 2] = 0.0
+        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(len(env_ids_to_reset_ball), 3)
+
+        # Aim toward the robot, with lateral tolerance interpreted in meters.
+        to_robot_xy = base_pos[:, 0:2] - ball_pos[:, 0:2]
+        to_robot_norm = torch.norm(to_robot_xy, dim=-1, keepdim=True).clamp_min(1e-6)
+        to_robot_dir_xy = to_robot_xy / to_robot_norm
+        perpendicular_dir_xy = torch.stack((-to_robot_dir_xy[:, 1], to_robot_dir_xy[:, 0]), dim=-1)
+        ball_tolerance_m = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_tolerance"),
+        )
+        target_point_xy = base_pos[:, 0:2] + perpendicular_dir_xy * ball_tolerance_m.unsqueeze(-1)
+        final_vel_xy = target_point_xy - ball_pos[:, 0:2]
+        final_vel_norm = torch.norm(final_vel_xy, dim=-1, keepdim=True).clamp_min(1e-6)
+        final_vel_dir_xy = final_vel_xy / final_vel_norm
+        target_speed = apply_randomization(
+            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            self.cfg["randomization"].get("ball_target_speed"),
+        )
+        self.root_states[env_ids_to_reset_ball, 1, 7:9] = final_vel_dir_xy * target_speed.unsqueeze(-1)
+
         # Set ball angular velocity with randomization
         self.root_states[env_ids_to_reset_ball, 1, 10] = apply_randomization(
             torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
@@ -562,7 +591,7 @@ class DribbleK1(BaseTask):
         # Sample ball target direction (unit vector in robot local frame)
         # Sample angle uniformly and convert to unit vector
         target_angles = torch_rand_float(-torch.pi, torch.pi, (len(env_ids), 1), device=self.device).squeeze(1)
-        speed = apply_randomization(torch.zeros(len(env_ids), 1, dtype=torch.float, device=self.device), self.cfg["randomization"].get("ball_target_speed"))
+        speed = torch.zeros(len(env_ids), 1, dtype=torch.float, device=self.device)
         self.commands[env_ids, 0] = torch.cos(target_angles) * speed.squeeze(1)  # ball_target_dir_x
         self.commands[env_ids, 1] = torch.sin(target_angles) * speed.squeeze(1)  # ball_target_dir_y
             
@@ -854,17 +883,60 @@ class DribbleK1(BaseTask):
 
     def _check_termination(self):
         """Check if environments need to be reset"""
-        self.reset_buf = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0, dim=1)
-        self.reset_buf |= self.root_states[:, 0, 7:13].square().sum(dim=-1) > self.cfg["rewards"]["terminate_vel"]
-        self.reset_buf |= self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos) < self.cfg["rewards"]["terminate_height"]
-        self.time_out_buf = self.episode_length_buf > np.ceil(self.cfg["rewards"]["episode_length_s"] / self.dt)
-        self.reset_buf |= self.time_out_buf
+        contact_terminate = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0, dim=1)
+
+        # Use separate limits for linear and angular velocity to avoid mixing units (m/s and rad/s).
+        rewards_cfg = self.cfg["rewards"]
+        if "terminate_lin_vel" in rewards_cfg and "terminate_ang_vel" in rewards_cfg:
+            terminate_lin_vel = float(rewards_cfg["terminate_lin_vel"])
+            terminate_ang_vel = float(rewards_cfg["terminate_ang_vel"])
+        else:
+            # Backward compatibility: old config used a single threshold on ||[v, w]||^2.
+            legacy_vel_limit = float(rewards_cfg["terminate_vel"])
+            fallback_limit = float(np.sqrt(max(legacy_vel_limit, 0.0)))
+            terminate_lin_vel = fallback_limit
+            terminate_ang_vel = fallback_limit
+
+        lin_vel_sq = self.root_states[:, 0, 7:10].square().sum(dim=-1)
+        ang_vel_sq = self.root_states[:, 0, 10:13].square().sum(dim=-1)
+        lin_vel_terminate = lin_vel_sq > (terminate_lin_vel * terminate_lin_vel)
+        ang_vel_terminate = ang_vel_sq > (terminate_ang_vel * terminate_ang_vel)
+        velocity_terminate = lin_vel_terminate | ang_vel_terminate
+        height_terminate = self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos) < self.cfg["rewards"]["terminate_height"]
+        timeout_terminate = self.episode_length_buf > np.ceil(self.cfg["rewards"]["episode_length_s"] / self.dt)
+
+        self.reset_buf = contact_terminate | velocity_terminate | height_terminate | timeout_terminate
+        self.time_out_buf = timeout_terminate
         self.time_out_buf |= self.episode_length_buf == self.cmd_resample_time
         
         # Check if ball is too far from robot (mark for ball-only reset or full reset)
         max_ball_distance = self.cfg["rewards"].get("max_ball_distance", 3.0)
         ball_too_far = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1) > max_ball_distance
         self.reset_ball_buf = ball_too_far  # Mark ball for reset
+
+        if self.debug_termination and (self.common_step_counter % self.debug_termination_interval == 0):
+            reset_count = int(self.reset_buf.sum().item())
+            ball_only_reset_mask = self.reset_ball_buf & ~self.reset_buf
+            ball_only_reset_count = int(ball_only_reset_mask.sum().item())
+            if reset_count > 0 or ball_only_reset_count > 0:
+                print(
+                    "[termination] "
+                    f"step={self.common_step_counter} "
+                    f"reset={reset_count} "
+                    f"contact={int(contact_terminate.sum().item())} "
+                    f"velocity={int(velocity_terminate.sum().item())} "
+                    f"velocity_lin={int(lin_vel_terminate.sum().item())} "
+                    f"velocity_ang={int(ang_vel_terminate.sum().item())} "
+                    f"height={int(height_terminate.sum().item())} "
+                    f"timeout={int(timeout_terminate.sum().item())} "
+                    f"ball_only_reset={ball_only_reset_count}"
+                )
+                if reset_count > 0:
+                    reset_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()[: self.debug_termination_max_envs].tolist()
+                    print(f"[termination] reset env ids (sample): {reset_env_ids}")
+                if ball_only_reset_count > 0:
+                    ball_only_env_ids = ball_only_reset_mask.nonzero(as_tuple=False).flatten()[: self.debug_termination_max_envs].tolist()
+                    print(f"[termination] ball-only env ids (sample): {ball_only_env_ids}")
 
     def _compute_reward(self):
         """Compute rewards
