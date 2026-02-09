@@ -1,4 +1,5 @@
 import os
+import csv
 
 from isaacgym import gymtorch, gymapi
 from isaacgym.torch_utils import (
@@ -29,6 +30,7 @@ class BallControlK1(BaseTask):
         self.gym.prepare_sim(self.sim)
         self._init_buffers()
         self._prepare_reward_function()
+        self._init_csv_logging()
 
     def _create_envs(self):
         self.num_envs = self.cfg["env"]["num_envs"]
@@ -343,6 +345,8 @@ class BallControlK1(BaseTask):
         self.reset_ball_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)  # Buffer for ball-only resets
         self.last_ball_lin_vel_world = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)  # World frame
         self.last_relative_ball_pos = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Last frame ball position in robot frame
+        self.episode_start_base_pos_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Robot XY at episode reset
+        self.ball_still_time_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # How long the ball stayed below speed threshold
         
         # Ball detection simulation (simulates camera at 30 FPS with jitter)
         # Stores ball positions in ROBOT FRAME - only updates when detection occurs
@@ -389,6 +393,91 @@ class BallControlK1(BaseTask):
             name = "_reward_" + name
             self.reward_functions.append(getattr(self, name))
 
+    def _init_csv_logging(self):
+        """Initialize CSV logging for reward values"""
+        # Check if CSV logging is enabled in config
+        self.csv_logging_enabled = self.cfg.get("basic", {}).get("enable_csv_logging", True)
+
+        if not self.csv_logging_enabled:
+            print("CSV logging disabled in configuration")
+            return
+
+        # Only log for environment 0 (single environment setup)
+        self.log_env_id = 0
+
+        # Create logs directory if it doesn't exist
+        self.log_dir = "logs"
+        if not os.path.exists(self.log_dir):
+            os.makedirs(self.log_dir)
+
+        # Create CSV file with timestamp
+        import time
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        self.csv_filename = os.path.join(self.log_dir, f"debug_csv/reward_log_{timestamp}.csv")
+
+        # Prepare CSV headers
+        self.csv_headers = [
+            "episode_step", "total_reward",
+            "ball_pos_x", "ball_pos_y", "ball_pos_z",
+            "ball_vel_x", "ball_vel_y", "ball_vel_z",
+            "robot_pos_x", "robot_pos_y", "robot_pos_z",
+            "robot_lin_vel_x", "robot_lin_vel_y", "robot_lin_vel_z",
+            "ball_speed", "ball_distance_to_robot"
+        ]
+        reward_names = ["reward_" + name for name in self.reward_names]
+        self.csv_headers.extend(reward_names)  # Add all individual reward terms
+
+        # Initialize CSV file with headers
+        with open(self.csv_filename, 'w', newline='') as csvfile:
+            writer = csv.writer(csvfile)
+            writer.writerow(self.csv_headers)
+
+        print(f"CSV logging initialized: {self.csv_filename}")
+
+    def _log_rewards_to_csv(self):
+        """Log current step rewards to CSV file"""
+        # Check if CSV logging is enabled
+        if not getattr(self, 'csv_logging_enabled', False):
+            return
+
+        # Only log for the specified environment (0)
+        if hasattr(self, 'episode_length_buf'):
+            episode_step = self.episode_length_buf[self.log_env_id].item()
+            total_reward = self.rew_buf[self.log_env_id].item()
+
+            # Get ball and robot state information
+            ball_pos = self.ball_pos[self.log_env_id].cpu().numpy()
+            ball_vel_world = self.root_states[self.log_env_id, 1, 7:10].cpu().numpy()
+            robot_pos = self.base_pos[self.log_env_id].cpu().numpy()
+            robot_lin_vel = self.base_lin_vel[self.log_env_id].cpu().numpy()
+
+            # Calculate derived metrics
+            ball_speed = torch.norm(self.root_states[self.log_env_id, 1, 7:10]).item()
+            ball_distance_to_robot = torch.norm(self.ball_pos[self.log_env_id] - self.base_pos[self.log_env_id]).item()
+
+            # Prepare row data
+            row_data = [
+                episode_step, total_reward,
+                ball_pos[0], ball_pos[1], ball_pos[2],
+                ball_vel_world[0], ball_vel_world[1], ball_vel_world[2],
+                robot_pos[0], robot_pos[1], robot_pos[2],
+                robot_lin_vel[0], robot_lin_vel[1], robot_lin_vel[2],
+                ball_speed, ball_distance_to_robot
+            ]
+
+            # Add individual reward terms
+            for reward_name in self.reward_names:
+                if reward_name in self.extras["rew_terms"]:
+                    reward_value = self.extras["rew_terms"][reward_name][self.log_env_id].item()
+                    row_data.append(reward_value)
+                else:
+                    row_data.append(0.0)  # Default if reward term not found
+
+            # Write to CSV
+            with open(self.csv_filename, 'a', newline='') as csvfile:
+                writer = csv.writer(csvfile)
+                writer.writerow(row_data)
+
     def reset(self):
         """Reset all robots"""
         self._reset_idx(torch.arange(self.num_envs, device=self.device))
@@ -403,6 +492,7 @@ class BallControlK1(BaseTask):
         self._update_curriculum(env_ids)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+        self.episode_start_base_pos_xy[env_ids] = self.root_states[env_ids, 0, 0:2]
 
         self.last_dof_targets[env_ids] = self.dof_pos[env_ids]
         self.last_root_vel[env_ids] = self.root_states[env_ids, 0, 7:13]
@@ -412,6 +502,7 @@ class BallControlK1(BaseTask):
         self.cmd_resample_time[env_ids] = 0
         self.last_ball_lin_vel_world[env_ids] = 0.0  # Reset ball velocity tracking
         self.last_relative_ball_pos[env_ids] = 0.0  # Reset last ball position buffer
+        self.ball_still_time_buf[env_ids] = 0.0
         
         # Reset ball detection simulation - randomize initial timer for each env
         self.ball_detection_timer[env_ids] = torch_rand_float(
@@ -718,13 +809,15 @@ class BallControlK1(BaseTask):
             self.ball_detection_timer[ball_only_reset_env_ids] = torch_rand_float(
                 0.0, self.ball_detection_interval, (len(ball_only_reset_env_ids), 1), device=self.device
             ).squeeze(-1)
+            self.ball_still_time_buf[ball_only_reset_env_ids] = 0.0
             self.reset_ball_buf[ball_only_reset_env_ids] = False
 
         if self.is_play:
             self._draw_debug_lines()
 
         self._compute_reward()
-        
+        self._log_rewards_to_csv()
+
         # Update last_ball_lin_vel_world before potential full reset
         self.last_ball_lin_vel_world[:] = self.body_states[:, -1, 7:10]
 
@@ -886,26 +979,31 @@ class BallControlK1(BaseTask):
         contact_terminate = torch.any(torch.norm(self.contact_forces[:, self.termination_contact_indices, :], dim=-1) > 1.0, dim=1)
 
         # Use separate limits for linear and angular velocity to avoid mixing units (m/s and rad/s).
+        lin_vel_sq = self.root_states[:, 0, 7:10].square().sum(dim=-1)
+        ang_vel_sq = self.root_states[:, 0, 10:13].square().sum(dim=-1)
         rewards_cfg = self.cfg["rewards"]
         if "terminate_lin_vel" in rewards_cfg and "terminate_ang_vel" in rewards_cfg:
             terminate_lin_vel = float(rewards_cfg["terminate_lin_vel"])
             terminate_ang_vel = float(rewards_cfg["terminate_ang_vel"])
+            lin_vel_terminate = lin_vel_sq > (terminate_lin_vel * terminate_lin_vel)
+            ang_vel_terminate = ang_vel_sq > (terminate_ang_vel * terminate_ang_vel)
+            velocity_terminate = lin_vel_terminate | ang_vel_terminate
         else:
-            # Backward compatibility: old config used a single threshold on ||[v, w]||^2.
-            legacy_vel_limit = float(rewards_cfg["terminate_vel"])
-            fallback_limit = float(np.sqrt(max(legacy_vel_limit, 0.0)))
-            terminate_lin_vel = fallback_limit
-            terminate_ang_vel = fallback_limit
-
-        lin_vel_sq = self.root_states[:, 0, 7:10].square().sum(dim=-1)
-        ang_vel_sq = self.root_states[:, 0, 10:13].square().sum(dim=-1)
-        lin_vel_terminate = lin_vel_sq > (terminate_lin_vel * terminate_lin_vel)
-        ang_vel_terminate = ang_vel_sq > (terminate_ang_vel * terminate_ang_vel)
-        velocity_terminate = lin_vel_terminate | ang_vel_terminate
+            raise KeyError("Missing velocity termination thresholds in rewards config")
         height_terminate = self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos) < self.cfg["rewards"]["terminate_height"]
         timeout_terminate = self.episode_length_buf > np.ceil(self.cfg["rewards"]["episode_length_s"] / self.dt)
+        ball_speed_xy = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        ball_still_speed_threshold = self.cfg["rewards"].get("ball_still_speed_threshold", 0.05)
+        ball_still_required_time = self.cfg["rewards"].get("ball_still_termination_s", 4.0)
+        ball_is_still = ball_speed_xy < ball_still_speed_threshold
+        self.ball_still_time_buf = torch.where(
+            ball_is_still,
+            self.ball_still_time_buf + self.dt,
+            torch.zeros_like(self.ball_still_time_buf),
+        )
+        ball_still_terminate = self.ball_still_time_buf >= ball_still_required_time
 
-        self.reset_buf = contact_terminate | velocity_terminate | height_terminate | timeout_terminate
+        self.reset_buf = contact_terminate | velocity_terminate | height_terminate | timeout_terminate | ball_still_terminate
         self.time_out_buf = timeout_terminate
         self.time_out_buf |= self.episode_length_buf == self.cmd_resample_time
         
@@ -929,6 +1027,7 @@ class BallControlK1(BaseTask):
                     f"velocity_ang={int(ang_vel_terminate.sum().item())} "
                     f"height={int(height_terminate.sum().item())} "
                     f"timeout={int(timeout_terminate.sum().item())} "
+                    f"ball_still={int(ball_still_terminate.sum().item())} "
                     f"ball_only_reset={ball_only_reset_count}"
                 )
                 if reset_count > 0:
@@ -1051,6 +1150,13 @@ class BallControlK1(BaseTask):
         # Tracking of base height
         base_height = self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos)
         return torch.square(base_height - self.cfg["rewards"]["base_height_target"])
+
+    def _reward_height_margin(self):
+        # Exponential penalty near terminate_height (strong when base is close to the cutoff).
+        base_height = self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos)
+        margin = torch.clamp(base_height - self.cfg["rewards"]["terminate_height"], min=0.0)
+        sigma = self.cfg["rewards"].get("height_margin_sigma", 0.05)
+        return torch.exp(-margin / sigma)
 
     def _reward_collision(self):
         # Penalize collisions on selected bodies
@@ -1308,7 +1414,9 @@ class BallControlK1(BaseTask):
 
     def _reward_ball_velocity_tracking(self):
         """
-        Rewards ball velocity tracking using cosine similarity (direction) + magnitude matching.
+        Rewards ball velocity tracking.
+        - For non-zero target velocity: cosine similarity (direction) + magnitude matching.
+        - For zero target velocity: rewards low ball speed (stopping behavior).
         
         Output range: -1 to +1
           +1 = perfect direction AND perfect speed
@@ -1318,6 +1426,7 @@ class BallControlK1(BaseTask):
         Config parameters:
           - ball_vel_tracking_sigma: controls sensitivity of speed matching (default: 1.0)
           - ball_vel_tracking_min_speed: minimum ball speed for reward (default: 0.1)
+          - ball_vel_tracking_stop_sigma: controls sensitivity for zero-target stopping reward (default: same as ball_vel_tracking_sigma)
         """
         ball_vel_world = self.body_states[:, -1, 7:10]  # Ball velocity in world frame
         actual_vel = ball_vel_world[:, 0:2]  # XY velocity
@@ -1342,26 +1451,51 @@ class BallControlK1(BaseTask):
         # Range: -1 (opposite dir, good speed) to +1 (aligned, good speed)
         reward = cos_sim * speed_reward
         
-        # Zero reward when ball is not moving (avoids noise from stationary ball)
+        # For non-zero targets, ignore very small actual speeds to avoid noisy direction reward.
         min_speed = self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
         is_moving = actual_speed > min_speed
-        
-        # Zero reward when no target is commanded
         has_target = target_speed > 1e-6
-        
-        reward = reward * is_moving.float() * has_target.float()
-        return reward
+
+        tracking_reward = reward * is_moving.float()
+
+        # When no target velocity is commanded, reward stopping only if the robot
+        # is close enough to plausibly control the ball (avoids passive waiting).
+        stop_sigma = self.cfg["rewards"].get("ball_vel_tracking_stop_sigma", sigma)
+        stop_reward = torch.exp(-actual_speed / stop_sigma)
+        ball_distance = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
+        control_dist = self.cfg["rewards"].get("ball_stop_control_distance", 0.45)
+        control_dist_sigma = self.cfg["rewards"].get("ball_stop_control_distance_sigma", 0.15)
+        distance_gate = torch.exp(-torch.square(torch.clamp(ball_distance - control_dist, min=0.0)) / control_dist_sigma)
+        stop_reward = stop_reward * distance_gate
+
+        return torch.where(has_target, tracking_reward, stop_reward)
 
     def _reward_ball_distance_penalty(self):
         """Penalizes distance from robot to ball"""
         robot_pos = self.base_pos[:, 0:2]  # Robot XY position
         ball_pos = self.ball_pos[:, 0:2]    # Ball XY position
 
-        # target pos is 10 cm behind ball in the direction of the ball's velocity
+        # For moving-target tasks (non-zero command), target position stays behind the ball
+        # in command direction. For ball-receive tasks (zero command), place target ahead
+        # of the rolling ball to encourage interception instead of chasing.
         command_norm = torch.norm(self.commands[:, :2], dim=-1, keepdim=True)
-        # Prevent division by zero by adding small epsilon
         normed_commands = self.commands[:, :2] / (command_norm + 1e-8)
-        target_pos = ball_pos -(0.1 + self.ball_radii) * normed_commands
+        has_target = command_norm.squeeze(-1) > 1e-6
+
+        ball_vel_xy = self.ball_lin_vel[:, 0:2]
+        ball_speed = torch.norm(ball_vel_xy, dim=-1, keepdim=True)
+        ball_dir = ball_vel_xy / (ball_speed + 1e-8)
+        moving_ball = ball_speed.squeeze(-1) > self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
+
+        dribble_offset = (0.1 + self.ball_radii)
+        receive_offset = self.cfg["rewards"].get("ball_receive_intercept_offset", 0.25)
+
+        target_pos_dribble = ball_pos - dribble_offset * normed_commands
+        target_pos_receive = ball_pos + receive_offset * ball_dir
+        target_pos_stop = ball_pos
+
+        target_pos = torch.where(has_target.unsqueeze(-1), target_pos_dribble, target_pos_stop)
+        target_pos = torch.where((~has_target & moving_ball).unsqueeze(-1), target_pos_receive, target_pos)
 
         # visualize target pos via a red line from ball to target pos
         z_coords = np.full(ball_pos.shape[0], 0.2, dtype=np.float32)
@@ -1412,3 +1546,24 @@ class BallControlK1(BaseTask):
         reward = torch.exp(-torch.square(angle_error) / sigma)
         
         return reward
+
+    def _reward_ball_stop_near_start(self):
+        """Reward stopping the ball near the robot start point for receive/control behavior."""
+        ball_pos_xy = self.ball_pos[:, 0:2]
+        start_pos_xy = self.episode_start_base_pos_xy
+        ball_speed = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+
+        # Reward proximity of stopped ball to episode start position.
+        distance = torch.norm(ball_pos_xy - start_pos_xy, dim=-1)
+        dist_sigma = self.cfg["rewards"].get("ball_stop_near_start_sigma", 0.7)
+        near_start_reward = torch.exp(-torch.square(distance) / dist_sigma)
+
+        # Gate by low speed so this term mostly matters when ball is being controlled/stopped.
+        stop_sigma = self.cfg["rewards"].get("ball_stop_near_start_speed_sigma", 0.2)
+        stop_gate = torch.exp(-ball_speed / stop_sigma)
+
+        # Apply this objective only for zero-velocity command mode.
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        no_target = target_speed <= 1e-6
+
+        return near_start_reward * stop_gate * no_target.float()

@@ -1,6 +1,6 @@
 basic:
   checkpoint: null # set to -1 to load last saved model
-  headless: false
+  headless: true
   max_iterations: 10000 # set the maximum number of learning iterations to train for
   sim_device: "cuda:0" # device for physics simulation
   rl_device: "cuda:0" # device for the RL algorithm
@@ -10,6 +10,7 @@ basic:
   debug_termination: false # print termination reasons in _check_termination
   debug_termination_interval: 1 # print every N sim steps when any reset is triggered
   debug_termination_max_envs: 5 # max env ids to print per termination sample
+  enable_csv_logging: true
   task: "K1/BallControlK1"
 
 env:
@@ -31,7 +32,7 @@ viewer:
   pos: [3., -3., 2.]  # [m]
   lookat: [0., 0., 0.]  # [m]
   record_video: true  # only in play
-  record_interval: 30.  # [s]
+  record_interval: 60  # [s]
   record_env_idx: 0
   
 
@@ -375,16 +376,17 @@ randomization:
 rewards:
   scales:
     survival: 0.25
-    base_height: -20.
+    base_height: -25.
+    height_margin: -1.5  # Exponential penalty when base height gets close to terminate_height
     # Additional parameter rewards
     torques: -3.e-4
     torque_tiredness: -1.e-2
     power: -3.e-3
     lin_vel_z: -2.
-    dof_vel: -2.e-4
-    dof_acc: -2.e-7
+    dof_vel: -1.9e-4
+    dof_acc: -1.9e-7
     root_acc: -1.e-4
-    action_rate: -1.5
+    action_rate: -1.4
     dof_pos_limits: -1.
     dof_vel_limits: -0.
     torque_limits: -0.
@@ -394,8 +396,9 @@ rewards:
     # Ball-related rewards
     ball_velocity_tracking: 2  # Reward for direction (cosine sim) + speed matching. Range: -1 to +1
     ball_distance_penalty: -0.25  # Penalty for being far from ball
-    look_at_ball: .5  # Reward for facing towards the ball
-  episode_length_s: 30.
+    look_at_ball: .3  # Reward for facing towards the ball
+    ball_stop_near_start: 2.5  # Reward stopping the ball near robot episode start position
+  episode_length_s: 10.
   terminate_height: 0.35
   terminate_lin_vel: 5.0  # [m/s] terminate if ||base linear vel|| exceeds this
   terminate_ang_vel: 20.0  # [rad/s] terminate if ||base angular vel|| exceeds this
@@ -404,6 +407,7 @@ rewards:
   penalize_contacts_on: ["Trunk", "H1", "H2", "AL", "AR", "Waist", "Hip", "Shank", "Ankle"]
   only_positive_rewards: false # if true negative total rewards are clipped at zero (avoids early termination problems)
   tracking_sigma: 0.25 # tracking reward = exp(-error^2/sigma)
+  height_margin_sigma: 0.075  # [m] exponential decay width for height_margin reward
   base_height_target: 0.54
   soft_dof_pos_limit: 1. # percentage of urdf limits, values above this limit are penalized
   soft_dof_vel_limit: 1.
@@ -413,6 +417,14 @@ rewards:
   # Ball-related reward parameters
   ball_vel_tracking_sigma: 1.0  # Sigma for velocity tracking reward
   ball_vel_tracking_min_speed: 0.1  # Minimum ball speed for tracking reward
-  ball_distance_sigma: 1.0  # Sigma for distance penalty
+  ball_vel_tracking_stop_sigma: 0.5  # Sigma for zero-target stopping reward (smaller = stronger stop pressure)
+  ball_stop_control_distance: 0.45  # [m] stop reward is gated by robot-ball distance beyond this threshold
+  ball_stop_control_distance_sigma: 0.15  # [m] smoothness for stop-reward distance gate
+  ball_receive_intercept_offset: 0.25  # [m] for zero-target+moving-ball, stand this far ahead of ball velocity
+  ball_stop_near_start_sigma: 0.7  # [m^2-like scale] closeness sensitivity to robot start point
+  ball_stop_near_start_speed_sigma: 0.2  # [m/s] smaller = only rewards near-zero ball speed
+  ball_distance_sigma: 3.0  # Sigma for distance penalty
+  ball_still_speed_threshold: 0.05  # [m/s] below this XY speed counts as "ball still"
+  ball_still_termination_s: 4.0  # [s] terminate episode if ball stays still this long
   max_ball_distance: 5.0  # Reset if ball goes >5m from robot
   look_at_ball_sigma: 0.5  # Sigma for look-at-ball reward (smaller = stricter)
