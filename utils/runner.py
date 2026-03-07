@@ -251,6 +251,13 @@ class Runner:
         except Exception as e:
             print(f"Failed to load curriculum: {e}")
         try:
+            if hasattr(self.env, 'ball_curriculum_global_level') and "ball_curriculum_level" in model_dict:
+                self.env.ball_curriculum_global_level = int(model_dict["ball_curriculum_level"])
+                self.env.ball_curriculum_level[:] = self.env.ball_curriculum_global_level
+                print(f"Restored ball curriculum level: {self.env.ball_curriculum_global_level}")
+        except Exception as e:
+            print(f"Failed to load ball curriculum level: {e}")
+        try:
             self.optimizer.load_state_dict(model_dict["optimizer"])
         except Exception as e:
             print(f"Failed to load optimizer: {e}")
@@ -289,6 +296,7 @@ class Runner:
                         "model": self.model.state_dict(),
                         "optimizer": self.optimizer.state_dict(),
                         "curriculum": self.env.curriculum_prob,
+                        "ball_curriculum_level": getattr(self.env, 'ball_curriculum_global_level', 0),
                     },
                     it + 1,
                 )
@@ -302,6 +310,7 @@ class Runner:
                             "model": self.model.state_dict(),
                             "optimizer": self.optimizer.state_dict(),
                             "curriculum": self.env.curriculum_prob,
+                            "ball_curriculum_level": getattr(self.env, 'ball_curriculum_global_level', 0),
                         },
                         it + 1,
                     )
@@ -324,6 +333,8 @@ class Runner:
                 self.buffer.update_data("time_outs", n, infos["time_outs"].to(self.device))
                 ep_info = {"reward": rew}
                 ep_info.update(infos["rew_terms"])
+                if "metrics" in infos:
+                    ep_info.update(infos["metrics"])
                 self.recorder.record_episode_statistics(done, ep_info, it, n == (self.cfg["runner"]["horizon_length"] - 1))
 
             with torch.no_grad():
@@ -521,7 +532,7 @@ class Runner:
             # Step the environment with current policy
             with torch.no_grad():
                 dist = self.model.act(obs)
-                act = dist.sample()
+                act = dist.loc
             
             obs, rew, done, infos = self.env.step(act)
             obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
@@ -638,7 +649,7 @@ class Runner:
             # Step the environment with current policy first
             with torch.no_grad():
                 dist = self.model.act(obs)
-                act = dist.sample()
+                act = dist.loc
             
             obs, rew, done, infos = self.env.step(act)
             obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
@@ -858,8 +869,8 @@ class Runner:
             cmd.extend(["--sim_device", self.args.sim_device])
         if self.args.rl_device is not None:
             cmd.extend(["--rl_device", self.args.rl_device])
-        if self.args.seed is not None:
-            cmd.extend(["--seed", str(self.args.seed)])
+        # Always forward the active training seed so video subprocesses are reproducible.
+        cmd.extend(["--seed", str(self.cfg["basic"]["seed"])])
         if self.args.model is not None:
             cmd.extend(["--model", self.args.model])
         

@@ -94,7 +94,7 @@ asset:
 
 ball:
   name: "ball"
-  radius: 0.075 # Ball radius in meters
+  radius: 0.05 # Ball radius in meters
   mass: 0.16 # Ball mass in kg
   init_pos: [0.3, 0.0, 0.06]  # Initial position of the ball
   init_rot: [0.0, 0.0, 0.0, 1.0]  # Initial rotation (quaternion)
@@ -108,6 +108,9 @@ ball:
   spawn_radius: 2  # Maximum distance from robot to place the ball at reset
   detection_fps: 30.0  # Simulated camera FPS for ball detection
   detection_fps_jitter: 0.15  # Randomization of detection timing (±15%)
+  perception_lag_min_s: 0.08  # Randomized past snapshot lag lower bound
+  perception_lag_max_s: 0.18  # Randomized past snapshot lag upper bound
+  detection_age_clip_s: 0.25  # Clip for detection-age observation
 
 init_state:
   pos: [0.0, 0.0, 0.58] # x,y,z [m]
@@ -191,6 +194,7 @@ normalization:
   clip_actions: 1.
   ball_pos: 0.33333333333  # Normalize ball position (1/3m scale)
   ball_vel: 1.0
+  ball_detection_age: 4.0
   ball_target_vel: 1.0  # No scaling needed for ball target velocity
   gait_frequency_offset: 1.0
 
@@ -247,7 +251,7 @@ randomization:
     distribution: "gaussian"
 
   ball_radius:
-    range: [-0.02, 0.02]
+    range: [-0.01, 0.01]
     operation: "additive"
     distribution: "uniform"
   ball_mass:
@@ -373,12 +377,25 @@ randomization:
     operation: "scaling"
     distribution: "uniform"
 
+ball_curriculum:
+  enabled: true
+  advance_threshold: 0.6
+  retreat_threshold: 0.3
+  evaluation_window: 200
+  num_levels: 4
+  distance_min: [1.5, 1.5, 1.0, 0.0]
+  distance_max: [2.5, 3.5, 4.0, 4.0]
+  speed_min:    [0.5, 0.8, 1.0, 1.0]
+  speed_max:    [1.0, 1.5, 2.5, 3.0]
+  tolerance:    [0.3, 0.7, 1.0, 1.0]
+  y_range:      [1.0, 2.0, 3.0, 4.0]
+
 rewards:
   scales:
+    # === Walking quality (golden values from 2026-02-09) ===
     survival: 0.25
     base_height: -25.
-    height_margin: -1.5  # Exponential penalty when base height gets close to terminate_height
-    # Additional parameter rewards
+    height_margin: -1.5
     torques: -3.e-4
     torque_tiredness: -1.e-2
     power: -3.e-3
@@ -391,13 +408,29 @@ rewards:
     dof_vel_limits: -0.
     torque_limits: -0.
     collision: -1.
-    feet_slip: -0.1       # Penalize feet pitch deviation
+    feet_slip: -0.1
     feet_swing: 2.
-    # Ball-related rewards
-    ball_velocity_tracking: 2  # Reward for direction (cosine sim) + speed matching. Range: -1 to +1
-    ball_distance_penalty: -0.25  # Penalty for being far from ball
-    look_at_ball: .3  # Reward for facing towards the ball
-    ball_stop_near_start: 2.5  # Reward stopping the ball near robot episode start position
+    # === Posture (reduced from previous) ===
+    upright_posture: 1.0
+    standing_stability: 0.3
+    # === Approach / positioning (strengthened) ===
+    approach_progress: 2.5
+    ball_distance_penalty: -0.25
+    ball_velocity_tracking: 2.0
+    shot_path_alignment: 1.5
+    perceived_intercept_timing: 0.9
+    incoming_source_position: 0.8
+    look_at_ball: .4
+    receive_zone_control: 3.0
+    ball_stop_near_start: 3.5
+    ball_passed_behind_penalty: -2.0
+    # === NEW — Active interception (anti-exploit) ===
+    interception_time_bonus: 8.0
+    ball_speed_reduction: 3.0
+    foot_ball_proximity: 1.5
+    ball_in_front_after_stop: 2.0
+    ball_travel_penalty: -2.0
+  
   episode_length_s: 10.
   terminate_height: 0.35
   terminate_lin_vel: 5.0  # [m/s] terminate if ||base linear vel|| exceeds this
@@ -414,6 +447,14 @@ rewards:
   soft_torque_limit: 1.
   swing_period: 0.2
   feet_distance_ref: 0.18
+  upright_sigma: 0.10
+  standing_lin_vel_sigma: 0.35
+  standing_ang_vel_sigma: 1.0
+  approach_progress_clip: 0.03
+  receive_dist_sigma: 0.20
+  receive_speed_sigma: 0.12
+  stability_gate_height: 0.46
+  stability_gate_sigma: 0.03
   # Ball-related reward parameters
   ball_vel_tracking_sigma: 1.0  # Sigma for velocity tracking reward
   ball_vel_tracking_min_speed: 0.1  # Minimum ball speed for tracking reward
@@ -428,3 +469,37 @@ rewards:
   ball_still_termination_s: 4.0  # [s] terminate episode if ball stays still this long
   max_ball_distance: 5.0  # Reset if ball goes >5m from robot
   look_at_ball_sigma: 0.5  # Sigma for look-at-ball reward (smaller = stricter)
+  shot_path_lateral_sigma: 0.10
+  shot_path_forward_min: 0.05
+  shot_path_forward_sigma: 0.08
+  perceived_intercept_lateral_sigma: 0.12
+  perceived_intercept_forward_min: 0.05
+  perceived_intercept_forward_sigma: 0.08
+  perceived_intercept_min_delta: 0.01
+  incoming_source_lateral_sigma: 0.10
+  incoming_source_forward_min: 0.05
+  incoming_source_forward_sigma: 0.08
+  ball_passed_margin_x: 0.03
+  ball_passed_depth_cap: 0.50
+  ball_passed_speed_threshold: 0.06
+  ball_passed_speed_sigma: 0.04
+  ball_passed_away_min: 0.04
+  ball_passed_away_sigma: 0.10
+  ball_passed_lateral_sigma: 0.25
+  receive_mode_target_speed_eps: 1.0e-6
+  # Interception time bonus parameters
+  interception_min_speed_drop: 0.05    # [m/s] per step threshold (natural friction ~0.02)
+  interception_foot_radius: 0.20       # [m] foot-to-ball proximity for contact detection
+  interception_time_tau: 2.0           # [s] time decay constant for one-shot bonus
+  # Ball speed reduction parameters
+  ball_speed_reduction_min_delta: 0.08 # [m/s] above natural friction per step
+  ball_speed_reduction_proximity_sigma: 0.10  # [m^2] foot proximity gate
+  # Foot-ball proximity parameters
+  foot_ball_proximity_sigma: 0.15      # [m^2] reward proximity sigma
+  # Ball in front parameters
+  ball_in_front_dist_sigma: 0.30       # [m^2] distance gate
+  ball_in_front_speed_sigma: 0.30      # [m/s] speed gate
+  # Time decay for existing ball-stop rewards
+  ball_reward_time_decay_tau: 3.0      # [s] decay constant
+  # Ball travel penalty
+  ball_travel_penalty_max: 5.0         # [m] normalisation cap

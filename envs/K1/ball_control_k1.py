@@ -123,6 +123,7 @@ class BallControlK1(BaseTask):
         self.actor_handles = []
         self.ball_handles = []  # Store ball handles
         self.base_mass_scaled = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device)
+        self.ball_radii = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         
         for i in range(self.num_envs):
             env_handle = self.gym.create_env(self.sim, env_lower, env_upper, int(np.sqrt(self.num_envs)))
@@ -140,8 +141,9 @@ class BallControlK1(BaseTask):
             self.gym.enable_actor_dof_force_sensors(env_handle, actor_handle)
 
             # Create ball actor
-            self.ball_radii = apply_randomization(self.cfg["ball"]["radius"], self.cfg["randomization"].get("ball_radius"))
-            ball_asset = self._create_ball_asset(radius=self.ball_radii)
+            ball_radius = float(apply_randomization(self.cfg["ball"]["radius"], self.cfg["randomization"].get("ball_radius")))
+            self.ball_radii[i] = ball_radius
+            ball_asset = self._create_ball_asset(radius=ball_radius)
             ball_handle = self.gym.create_actor(env_handle, ball_asset, start_pose, "ball", i, True, 0)
             try:
                 ball_body_props = self.gym.get_actor_rigid_body_properties(env_handle, ball_handle)
@@ -189,7 +191,6 @@ class BallControlK1(BaseTask):
         self.ball_rot = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device)
         self.ball_lin_vel = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.ball_ang_vel = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
-        self.ball_radius = self.cfg["ball"]["radius"]
 
     def _process_rigid_body_props(self, props, i):
         for j in range(self.num_bodies):
@@ -272,6 +273,7 @@ class BallControlK1(BaseTask):
         self.time_out_buf = torch.zeros(self.num_envs, device=self.device, dtype=torch.bool)
         self.extras = {}
         self.extras["rew_terms"] = {}
+        self.extras["metrics"] = {}
 
         # get gym state tensors
         actor_root_state = self.gym.acquire_actor_root_state_tensor(self.sim)
@@ -345,17 +347,55 @@ class BallControlK1(BaseTask):
         self.reset_ball_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)  # Buffer for ball-only resets
         self.last_ball_lin_vel_world = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)  # World frame
         self.last_relative_ball_pos = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Last frame ball position in robot frame
+        self.last_ball_distance_to_robot = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # Previous step XY distance robot-ball
         self.episode_start_base_pos_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Robot XY at episode reset
+        self.pass_ref_origin_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Fixed origin for pass-event checks
+        self.pass_ref_dir_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Fixed shot direction for pass-event checks
+        self.pass_ref_dir_xy[:, 0] = 1.0
         self.ball_still_time_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # How long the ball stayed below speed threshold
+
+        # Interception tracking
+        self.ball_has_been_contacted = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ball_first_contact_time = torch.full(
+            (self.num_envs,), 0.0, dtype=torch.float, device=self.device
+        )
+        self.ball_max_progress_along_shot = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+        self.ball_initial_progress = torch.zeros(
+            self.num_envs, dtype=torch.float, device=self.device
+        )
+
+        # Ball curriculum state
+        curriculum_cfg = self.cfg.get("ball_curriculum", {})
+        self.ball_curriculum_level = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        curriculum_window = curriculum_cfg.get("evaluation_window", 200)
+        self.ball_curriculum_success_ring = torch.zeros(
+            curriculum_window, dtype=torch.float, device=self.device
+        )
+        self.ball_curriculum_ring_idx = 0
+        self.ball_curriculum_global_level = 0
+
+        # Precompute receive mode mask (updated each step before reward computation)
+        self.receive_mode_mask = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         
         # Ball detection simulation (simulates camera at 30 FPS with jitter)
         # Stores ball positions in ROBOT FRAME - only updates when detection occurs
         self.ball_detection_fps = self.cfg["ball"].get("detection_fps", 30.0)
         self.ball_detection_jitter = self.cfg["ball"].get("detection_fps_jitter", 0.15)
         self.ball_detection_interval = 1.0 / self.ball_detection_fps  # Base interval in seconds
+        self.perception_lag_min_s = float(self.cfg["ball"].get("perception_lag_min_s", 0.08))
+        self.perception_lag_max_s = float(self.cfg["ball"].get("perception_lag_max_s", 0.18))
+        if self.perception_lag_max_s < self.perception_lag_min_s:
+            self.perception_lag_min_s, self.perception_lag_max_s = self.perception_lag_max_s, self.perception_lag_min_s
         self.perceived_ball_pos_relative = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Current detection (in robot frame)
         self.last_perceived_ball_pos_relative = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Previous detection (in robot frame)
+        self.lagged_perceived_ball_pos_relative = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)  # Randomized-lag detection snapshot (in robot frame)
         self.ball_detection_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # Time until next detection
+        self.lag_snapshot_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # Time until lag snapshot refresh on detection
+        self.ball_detection_age = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)  # Time since last detection
+        self.ball_pass_event_now = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)  # Per-step pass event flag
+        self.ball_pass_event_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)  # Episode-latched pass event flag
         self.feet_roll = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
         self.feet_yaw = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
         self.feet_yaw_rel = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
@@ -492,7 +532,16 @@ class BallControlK1(BaseTask):
         self._update_curriculum(env_ids)
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
+        self._update_pass_reference(env_ids)
+        # Seed initial progress so ball_travel_penalty starts at zero for spawned balls
+        rel_ball_origin_reset = self.root_states[env_ids, 1, 0:2] - self.pass_ref_origin_xy[env_ids]
+        self.ball_initial_progress[env_ids] = torch.sum(
+            rel_ball_origin_reset * self.pass_ref_dir_xy[env_ids], dim=-1
+        )
         self.episode_start_base_pos_xy[env_ids] = self.root_states[env_ids, 0, 0:2]
+        self.last_ball_distance_to_robot[env_ids] = torch.norm(
+            self.ball_pos[env_ids, 0:2] - self.base_pos[env_ids, 0:2], dim=-1
+        )
 
         self.last_dof_targets[env_ids] = self.dof_pos[env_ids]
         self.last_root_vel[env_ids] = self.root_states[env_ids, 0, 7:13]
@@ -503,6 +552,10 @@ class BallControlK1(BaseTask):
         self.last_ball_lin_vel_world[env_ids] = 0.0  # Reset ball velocity tracking
         self.last_relative_ball_pos[env_ids] = 0.0  # Reset last ball position buffer
         self.ball_still_time_buf[env_ids] = 0.0
+        self.ball_has_been_contacted[env_ids] = False
+        self.ball_first_contact_time[env_ids] = 0.0
+        self.ball_max_progress_along_shot[env_ids] = 0.0
+        # NOTE: ball_initial_progress is seeded above (lines ~539-541), do NOT zero it here
         
         # Reset ball detection simulation - randomize initial timer for each env
         self.ball_detection_timer[env_ids] = torch_rand_float(
@@ -514,9 +567,24 @@ class BallControlK1(BaseTask):
         noisy_relative_xy = apply_randomization(relative_ball_pos[:, 0:2], self.cfg["noise"].get("ball_pos"))
         self.perceived_ball_pos_relative[env_ids] = noisy_relative_xy
         self.last_perceived_ball_pos_relative[env_ids] = noisy_relative_xy
+        self.lagged_perceived_ball_pos_relative[env_ids] = noisy_relative_xy
+        self.ball_detection_age[env_ids] = 0.0
+        self.lag_snapshot_timer[env_ids] = self._sample_lag_snapshot_interval(len(env_ids))
+        self.ball_pass_event_now[env_ids] = False
+        self.ball_pass_event_latched[env_ids] = False
 
         self.delay_steps[env_ids] = torch.randint(0, self.cfg["control"]["decimation"], (len(env_ids),), device=self.device)
         self.extras["time_outs"] = self.time_out_buf
+
+    def _sample_lag_snapshot_interval(self, num_envs):
+        if num_envs <= 0:
+            return torch.zeros(0, dtype=torch.float, device=self.device)
+        return torch_rand_float(
+            self.perception_lag_min_s,
+            self.perception_lag_max_s,
+            (num_envs, 1),
+            device=self.device,
+        ).squeeze(-1)
 
     def _reset_dofs(self, env_ids):
         self.dof_pos[env_ids] = apply_randomization(self.default_dof_pos, self.cfg["randomization"].get("init_dof_pos"))
@@ -570,79 +638,133 @@ class BallControlK1(BaseTask):
             return
 
         robot_pos = self.root_states[env_ids_to_reset_ball, 0, 0:3]
+        n = len(env_ids_to_reset_ball)
 
-        # Sample ball placement offsets in meters from YAML randomization.
-        offset_x = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_init_pos_x"),
-        )
-        offset_y = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_init_pos_y"),
-        )
-        ball_target_xy = robot_pos[:, 0:2] + torch.stack((offset_x, offset_y), dim=-1)
-        
-        # Calculate ball's target Z position (on the ground + ball radius)
-        ball_target_z = self.terrain.terrain_heights(ball_target_xy) + self.cfg["ball"].get("radius", 0.11)
+        # --- Curriculum-aware spawn parameters ---
+        curriculum_cfg = self.cfg.get("ball_curriculum", {})
+        if curriculum_cfg.get("enabled", False):
+            level = self.ball_curriculum_global_level
+            dist_min = curriculum_cfg["distance_min"][level]
+            dist_max = curriculum_cfg["distance_max"][level]
+            spd_min  = curriculum_cfg["speed_min"][level]
+            spd_max  = curriculum_cfg["speed_max"][level]
+            tol      = curriculum_cfg["tolerance"][level]
+            y_range  = curriculum_cfg["y_range"][level]
 
-        # Set ball position
-        self.root_states[env_ids_to_reset_ball, 1, 0] = ball_target_xy[:, 0]
-        self.root_states[env_ids_to_reset_ball, 1, 1] = ball_target_xy[:, 1]
-        self.root_states[env_ids_to_reset_ball, 1, 2] = ball_target_z
-        
-        # Set ball orientation to default (identity quaternion)
-        identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(len(env_ids_to_reset_ball), 1)
-        self.root_states[env_ids_to_reset_ball, 1, 3:7] = identity_quat
-        
-        # Set ball linear velocity with randomization
-        self.root_states[env_ids_to_reset_ball, 1, 7] = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_init_lin_vel_x")
-        )
-        self.root_states[env_ids_to_reset_ball, 1, 8] = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_init_lin_vel_y")
-        )
-        self.root_states[env_ids_to_reset_ball, 1, 9] = 0.0  # z velocity stays zero
-        
-        ball_pos = self.root_states[env_ids_to_reset_ball, 1, 0:3]
-        base_pos = self.root_states[env_ids_to_reset_ball, 0, 0:3]
-        ball_base_diff = ball_pos - base_pos
-        ball_base_diff[:, 2] = 0.0
-        z_axis = torch.tensor([0.0, 0.0, 1.0], device=self.device).expand(len(env_ids_to_reset_ball), 3)
+            # Sample distance and lateral offset
+            offset_x = torch_rand_float(dist_min, dist_max, (n, 1), device=self.device).squeeze(-1)
+            offset_y = torch_rand_float(-y_range, y_range, (n, 1), device=self.device).squeeze(-1)
 
-        # Aim toward the robot, with lateral tolerance interpreted in meters.
-        to_robot_xy = base_pos[:, 0:2] - ball_pos[:, 0:2]
-        to_robot_norm = torch.norm(to_robot_xy, dim=-1, keepdim=True).clamp_min(1e-6)
-        to_robot_dir_xy = to_robot_xy / to_robot_norm
-        perpendicular_dir_xy = torch.stack((-to_robot_dir_xy[:, 1], to_robot_dir_xy[:, 0]), dim=-1)
-        ball_tolerance_m = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_tolerance"),
-        )
-        target_point_xy = base_pos[:, 0:2] + perpendicular_dir_xy * ball_tolerance_m.unsqueeze(-1)
-        final_vel_xy = target_point_xy - ball_pos[:, 0:2]
-        final_vel_norm = torch.norm(final_vel_xy, dim=-1, keepdim=True).clamp_min(1e-6)
-        final_vel_dir_xy = final_vel_xy / final_vel_norm
-        target_speed = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
-            self.cfg["randomization"].get("ball_target_speed"),
-        )
-        self.root_states[env_ids_to_reset_ball, 1, 7:9] = final_vel_dir_xy * target_speed.unsqueeze(-1)
+            ball_target_xy = robot_pos[:, 0:2] + torch.stack((offset_x, offset_y), dim=-1)
+            ball_target_z = self.terrain.terrain_heights(ball_target_xy) + self.ball_radii[env_ids_to_reset_ball]
 
-        # Set ball angular velocity with randomization
+            # Set ball position
+            self.root_states[env_ids_to_reset_ball, 1, 0] = ball_target_xy[:, 0]
+            self.root_states[env_ids_to_reset_ball, 1, 1] = ball_target_xy[:, 1]
+            self.root_states[env_ids_to_reset_ball, 1, 2] = ball_target_z
+
+            # Identity quaternion
+            identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).expand(n, -1)
+            self.root_states[env_ids_to_reset_ball, 1, 3:7] = identity_quat
+
+            # Aim toward robot with tolerance
+            ball_pos_xy = ball_target_xy
+            base_pos_xy = robot_pos[:, 0:2]
+            to_robot_xy = base_pos_xy - ball_pos_xy
+            to_robot_norm = torch.norm(to_robot_xy, dim=-1, keepdim=True).clamp_min(1e-6)
+            to_robot_dir = to_robot_xy / to_robot_norm
+            perp_dir = torch.stack((-to_robot_dir[:, 1], to_robot_dir[:, 0]), dim=-1)
+            lateral_offset = torch_rand_float(-tol, tol, (n, 1), device=self.device).squeeze(-1)
+            target_point = base_pos_xy + perp_dir * lateral_offset.unsqueeze(-1)
+            vel_dir = target_point - ball_pos_xy
+            vel_norm = torch.norm(vel_dir, dim=-1, keepdim=True).clamp_min(1e-6)
+            vel_dir = vel_dir / vel_norm
+            speed = torch_rand_float(spd_min, spd_max, (n, 1), device=self.device).squeeze(-1)
+            self.root_states[env_ids_to_reset_ball, 1, 7:9] = vel_dir * speed.unsqueeze(-1)
+            self.root_states[env_ids_to_reset_ball, 1, 9] = 0.0
+        else:
+            # Original randomization-based spawn (fallback)
+            offset_x = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_init_pos_x"),
+            )
+            offset_y = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_init_pos_y"),
+            )
+            ball_target_xy = robot_pos[:, 0:2] + torch.stack((offset_x, offset_y), dim=-1)
+            ball_target_z = self.terrain.terrain_heights(ball_target_xy) + self.ball_radii[env_ids_to_reset_ball]
+
+            self.root_states[env_ids_to_reset_ball, 1, 0] = ball_target_xy[:, 0]
+            self.root_states[env_ids_to_reset_ball, 1, 1] = ball_target_xy[:, 1]
+            self.root_states[env_ids_to_reset_ball, 1, 2] = ball_target_z
+
+            identity_quat = torch.tensor([0.0, 0.0, 0.0, 1.0], device=self.device).unsqueeze(0).repeat(n, 1)
+            self.root_states[env_ids_to_reset_ball, 1, 3:7] = identity_quat
+
+            self.root_states[env_ids_to_reset_ball, 1, 7] = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_init_lin_vel_x")
+            )
+            self.root_states[env_ids_to_reset_ball, 1, 8] = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_init_lin_vel_y")
+            )
+            self.root_states[env_ids_to_reset_ball, 1, 9] = 0.0
+
+            ball_pos = self.root_states[env_ids_to_reset_ball, 1, 0:3]
+            base_pos = self.root_states[env_ids_to_reset_ball, 0, 0:3]
+
+            to_robot_xy = base_pos[:, 0:2] - ball_pos[:, 0:2]
+            to_robot_norm = torch.norm(to_robot_xy, dim=-1, keepdim=True).clamp_min(1e-6)
+            to_robot_dir_xy = to_robot_xy / to_robot_norm
+            perpendicular_dir_xy = torch.stack((-to_robot_dir_xy[:, 1], to_robot_dir_xy[:, 0]), dim=-1)
+            ball_tolerance_m = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_tolerance"),
+            )
+            target_point_xy = base_pos[:, 0:2] + perpendicular_dir_xy * ball_tolerance_m.unsqueeze(-1)
+            final_vel_xy = target_point_xy - ball_pos[:, 0:2]
+            final_vel_norm = torch.norm(final_vel_xy, dim=-1, keepdim=True).clamp_min(1e-6)
+            final_vel_dir_xy = final_vel_xy / final_vel_norm
+            target_speed = apply_randomization(
+                torch.zeros(n, dtype=torch.float, device=self.device),
+                self.cfg["randomization"].get("ball_target_speed"),
+            )
+            self.root_states[env_ids_to_reset_ball, 1, 7:9] = final_vel_dir_xy * target_speed.unsqueeze(-1)
+
+        # Angular velocity randomization (same for both paths)
         self.root_states[env_ids_to_reset_ball, 1, 10] = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            torch.zeros(n, dtype=torch.float, device=self.device),
             self.cfg["randomization"].get("ball_init_ang_vel_x")
         )
         self.root_states[env_ids_to_reset_ball, 1, 11] = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            torch.zeros(n, dtype=torch.float, device=self.device),
             self.cfg["randomization"].get("ball_init_ang_vel_y")
         )
         self.root_states[env_ids_to_reset_ball, 1, 12] = apply_randomization(
-            torch.zeros(len(env_ids_to_reset_ball), dtype=torch.float, device=self.device),
+            torch.zeros(n, dtype=torch.float, device=self.device),
             self.cfg["randomization"].get("ball_init_ang_vel_z")
         )
+
+    def _update_pass_reference(self, env_ids):
+        """Set per-env fixed origin and shot direction for pass-event rewards."""
+        if len(env_ids) == 0:
+            return
+
+        self.pass_ref_origin_xy[env_ids] = self.root_states[env_ids, 0, 0:2]
+
+        ball_vel_xy = self.root_states[env_ids, 1, 7:9]
+        ball_speed = torch.norm(ball_vel_xy, dim=-1, keepdim=True)
+        vel_dir = ball_vel_xy / (ball_speed + 1e-8)
+
+        # Fallback to ball->robot direction when initial ball speed is tiny.
+        ball_to_robot = self.root_states[env_ids, 0, 0:2] - self.root_states[env_ids, 1, 0:2]
+        ball_to_robot_norm = torch.norm(ball_to_robot, dim=-1, keepdim=True).clamp_min(1e-6)
+        fallback_dir = ball_to_robot / ball_to_robot_norm
+
+        use_vel_dir = ball_speed.squeeze(-1) > 1e-4
+        self.pass_ref_dir_xy[env_ids] = torch.where(use_vel_dir.unsqueeze(-1), vel_dir, fallback_dir)
 
     def _teleport_robot(self):
         if self.terrain.type == "plane":
@@ -714,8 +836,37 @@ class BallControlK1(BaseTask):
             self.commands[:, 1] = 1.0
 
     def _update_curriculum(self, env_ids):
-        # Curriculum not used for dribbling task with pre-trained walking model
-        pass
+        """Track interception success and adjust ball spawn difficulty."""
+        curriculum_cfg = self.cfg.get("ball_curriculum", {})
+        if not curriculum_cfg.get("enabled", False):
+            return
+        if len(env_ids) == 0:
+            return
+
+        # Record success/failure for resetting envs (vectorised)
+        successes = self.ball_has_been_contacted[env_ids].float()
+        n = len(successes)
+        ring_len = len(self.ball_curriculum_success_ring)
+        indices = (torch.arange(n, device=self.device) + self.ball_curriculum_ring_idx) % ring_len
+        self.ball_curriculum_success_ring[indices] = successes
+        self.ball_curriculum_ring_idx = int((self.ball_curriculum_ring_idx + n) % ring_len)
+
+        # Evaluate success rate
+        success_rate = self.ball_curriculum_success_ring.mean().item()
+        num_levels = curriculum_cfg.get("num_levels", 4)
+        advance_thresh = curriculum_cfg.get("advance_threshold", 0.6)
+        retreat_thresh = curriculum_cfg.get("retreat_threshold", 0.3)
+
+        if success_rate > advance_thresh and self.ball_curriculum_global_level < num_levels - 1:
+            self.ball_curriculum_global_level += 1
+            print(f"[Curriculum] Advanced to level {self.ball_curriculum_global_level} "
+                  f"(success_rate={success_rate:.2f})")
+        elif success_rate < retreat_thresh and self.ball_curriculum_global_level > 0:
+            self.ball_curriculum_global_level -= 1
+            print(f"[Curriculum] Retreated to level {self.ball_curriculum_global_level} "
+                  f"(success_rate={success_rate:.2f})")
+
+        self.ball_curriculum_level[:] = self.ball_curriculum_global_level
 
     def _resample_curriculum_commands(self, env_ids):
         # Curriculum not used for dribbling task - use standard resampling
@@ -782,11 +933,14 @@ class BallControlK1(BaseTask):
         self._kick_robots()
         self._push_robots()
         self._check_termination()  # Sets self.reset_buf and potentially self.reset_ball_buf
-        
+        self.ball_pass_event_now[:] = self._compute_ball_pass_event_mask()
+        self.ball_pass_event_latched |= self.ball_pass_event_now
+
         # Handle ball-only resets (ball too far, but robot is not resetting)
         ball_only_reset_env_ids = (self.reset_ball_buf & ~self.reset_buf).nonzero(as_tuple=False).flatten()
         if len(ball_only_reset_env_ids) > 0:
             self._reset_ball_at_robot_front(ball_only_reset_env_ids)
+            self._update_pass_reference(ball_only_reset_env_ids)
             # Update the ball actors in the simulation
             ball_actor_indices = (2 * ball_only_reset_env_ids + 1).to(dtype=torch.int32)
             self.gym.set_actor_root_state_tensor_indexed(
@@ -806,22 +960,71 @@ class BallControlK1(BaseTask):
             noisy_relative_xy = apply_randomization(relative_ball_pos[:, 0:2], self.cfg["noise"].get("ball_pos"))
             self.perceived_ball_pos_relative[ball_only_reset_env_ids] = noisy_relative_xy
             self.last_perceived_ball_pos_relative[ball_only_reset_env_ids] = noisy_relative_xy
+            self.lagged_perceived_ball_pos_relative[ball_only_reset_env_ids] = noisy_relative_xy
             self.ball_detection_timer[ball_only_reset_env_ids] = torch_rand_float(
                 0.0, self.ball_detection_interval, (len(ball_only_reset_env_ids), 1), device=self.device
             ).squeeze(-1)
+            self.lag_snapshot_timer[ball_only_reset_env_ids] = self._sample_lag_snapshot_interval(len(ball_only_reset_env_ids))
+            self.ball_detection_age[ball_only_reset_env_ids] = 0.0
+            self.ball_pass_event_now[ball_only_reset_env_ids] = False
             self.ball_still_time_buf[ball_only_reset_env_ids] = 0.0
+            self.ball_has_been_contacted[ball_only_reset_env_ids] = False
+            self.ball_first_contact_time[ball_only_reset_env_ids] = 0.0
+            self.ball_max_progress_along_shot[ball_only_reset_env_ids] = 0.0
+            # Seed initial progress so penalty starts at zero for freshly spawned balls
+            rel_ball_origin_bor = self.ball_pos[ball_only_reset_env_ids, 0:2] - self.pass_ref_origin_xy[ball_only_reset_env_ids]
+            self.ball_initial_progress[ball_only_reset_env_ids] = torch.sum(
+                rel_ball_origin_bor * self.pass_ref_dir_xy[ball_only_reset_env_ids], dim=-1
+            )
+            self.last_ball_distance_to_robot[ball_only_reset_env_ids] = torch.norm(
+                self.ball_pos[ball_only_reset_env_ids, 0:2] - self.base_pos[ball_only_reset_env_ids, 0:2], dim=-1
+            )
             self.reset_ball_buf[ball_only_reset_env_ids] = False
+
+        # Track max ball progress along shot direction (monotonically increasing)
+        # Subtract initial progress so freshly spawned balls start at 0
+        rel_ball_origin = self.ball_pos[:, 0:2] - self.pass_ref_origin_xy
+        progress = torch.sum(rel_ball_origin * self.pass_ref_dir_xy, dim=-1) - self.ball_initial_progress
+        self.ball_max_progress_along_shot = torch.max(
+            self.ball_max_progress_along_shot, progress
+        )
+
+        # Precompute receive mode mask for reward functions
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        self.receive_mode_mask = (target_speed <= 1e-6).float()
 
         if self.is_play:
             self._draw_debug_lines()
 
         self._compute_reward()
+        self.last_ball_distance_to_robot[:] = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
         self._log_rewards_to_csv()
 
         # Update last_ball_lin_vel_world before potential full reset
         self.last_ball_lin_vel_world[:] = self.body_states[:, -1, 7:10]
 
-        env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
+        # --- Capture terminal metrics BEFORE _reset_idx wipes buffers ---
+        # Only emit non-zero for done envs so the recorder's per-step
+        # accumulation yields the single terminal snapshot value.
+        done_mask = self.reset_buf  # bool (N,)
+        done_ids = done_mask.nonzero(as_tuple=False).flatten()
+
+        metric_pass_event = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        metric_pass_event[done_ids] = self.ball_pass_event_latched[done_ids].float()
+
+        metric_no_pass_success = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        metric_no_pass_success[done_ids] = (~self.ball_pass_event_latched[done_ids]).float()
+
+        metric_curriculum_level = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        metric_curriculum_level[done_ids] = float(self.ball_curriculum_global_level)
+
+        metric_first_contact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        metric_first_contact[done_ids] = self.ball_first_contact_time[done_ids]
+
+        metric_max_progress = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        metric_max_progress[done_ids] = self.ball_max_progress_along_shot[done_ids]
+
+        env_ids = done_ids
         if len(env_ids) > 0:
             self._reset_idx(env_ids)
             self.reset_ball_buf[env_ids] = False  # Ball reset is handled by full reset
@@ -836,6 +1039,13 @@ class BallControlK1(BaseTask):
         self.last_dof_vel[:] = self.dof_vel
         self.last_root_vel[:] = self.root_states[:, 0, 7:13]
         self.last_feet_pos[:] = self.feet_pos
+        self.extras["metrics"] = {
+            "pass_event": metric_pass_event,
+            "no_pass_success_terminal": metric_no_pass_success,
+            "ball_curriculum_level": metric_curriculum_level,
+            "ball_first_contact_time": metric_first_contact,
+            "ball_max_progress": metric_max_progress,
+        }
 
         return self.obs_buf, self.rew_buf, self.reset_buf, self.extras
 
@@ -917,6 +1127,8 @@ class BallControlK1(BaseTask):
         """
         # Decrement detection timer
         self.ball_detection_timer -= self.dt
+        self.lag_snapshot_timer -= self.dt
+        self.ball_detection_age += self.dt
         
         # Find environments where detection should occur (timer expired)
         detect_mask = self.ball_detection_timer <= 0
@@ -937,6 +1149,15 @@ class BallControlK1(BaseTask):
             
             # Update current perceived position (in robot frame, with noise baked in)
             self.perceived_ball_pos_relative[detect_ids] = current_relative_xy
+
+            # Refresh randomized lag snapshot only when due, using detected positions.
+            snapshot_due = self.lag_snapshot_timer[detect_ids] <= 0.0
+            if snapshot_due.any():
+                snapshot_ids = detect_ids[snapshot_due]
+                self.lagged_perceived_ball_pos_relative[snapshot_ids] = current_relative_xy[snapshot_due]
+                self.lag_snapshot_timer[snapshot_ids] = self._sample_lag_snapshot_interval(len(snapshot_ids))
+
+            self.ball_detection_age[detect_ids] = 0.0
             
             # Reset detection timer with randomized interval
             jitter_scale = 1.0 + torch_rand_float(
@@ -944,6 +1165,29 @@ class BallControlK1(BaseTask):
                 (len(detect_ids), 1), device=self.device
             ).squeeze(-1)
             self.ball_detection_timer[detect_ids] = self.ball_detection_interval * jitter_scale
+
+    def _compute_ball_pass_event_mask(self):
+        """Detect if ball passed behind the robot and is moving away along incoming direction."""
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        receive_mode_eps = float(self.cfg["rewards"].get("receive_mode_target_speed_eps", 1e-6))
+        receive_mode = target_speed <= receive_mode_eps
+
+        shot_dir = self.pass_ref_dir_xy
+        rel_ball_robot = self.ball_pos[:, 0:2] - self.base_pos[:, 0:2]
+        progress_along_shot = torch.sum(rel_ball_robot * shot_dir, dim=-1)
+        margin_x = float(self.cfg["rewards"].get("ball_passed_margin_x", 0.03))
+        passed_behind = progress_along_shot > margin_x
+
+        ball_vel_xy = self.ball_lin_vel[:, 0:2]
+        away_dot = torch.sum(ball_vel_xy * shot_dir, dim=-1)
+        away_min = float(self.cfg["rewards"].get("ball_passed_away_min", 0.04))
+        moving_away = away_dot > away_min
+
+        ball_speed = torch.norm(ball_vel_xy, dim=-1)
+        min_speed = float(self.cfg["rewards"].get("ball_passed_speed_threshold", 0.06))
+        moving = ball_speed > min_speed
+
+        return receive_mode & passed_behind & moving_away & moving
 
     def _refresh_feet_state(self):
         self.feet_pos[:] = self.body_states[:, self.feet_indices, 0:3]
@@ -1060,6 +1304,12 @@ class BallControlK1(BaseTask):
         # Use PERCEIVED ball position in robot frame (updates at ~30 FPS to simulate camera detection)
         # Both current and last positions stay constant between detections
         current_relative_ball_pos_xy = self.perceived_ball_pos_relative
+        lagged_relative_ball_pos_xy = self.lagged_perceived_ball_pos_relative
+        delta_relative_ball_pos_xy = current_relative_ball_pos_xy - lagged_relative_ball_pos_xy
+        age_clip_s = float(self.cfg["ball"].get("detection_age_clip_s", self.perception_lag_max_s))
+        detection_age_obs = torch.clamp(self.ball_detection_age, min=0.0, max=age_clip_s).unsqueeze(-1)
+        detection_age_scale = self.cfg["normalization"].get("ball_detection_age", 1.0 / max(age_clip_s, 1.0e-6))
+        detection_age_obs = detection_age_obs * detection_age_scale
         
         # Convert target direction from world frame to robot local frame for observation
         # Commands[:, 1:3] stores target direction in world coordinates
@@ -1097,10 +1347,11 @@ class BallControlK1(BaseTask):
                 # Ball observations (using perceived positions from 30 FPS detection)
                 # Noise is already baked in at detection time, not applied every step
                 current_relative_ball_pos_xy * self.cfg["normalization"]["ball_pos"],  # 2
-                self.last_perceived_ball_pos_relative * self.cfg["normalization"]["ball_pos"],  # 2
+                lagged_relative_ball_pos_xy * self.cfg["normalization"]["ball_pos"],  # 2
                 self.gait_frequency_offset.unsqueeze(-1) * self.cfg["normalization"]["gait_frequency_offset"],  # 1
-                # 3x zeros to fill up to 54 observations
-                torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device),
+                # Direction cue from randomized-lag position pair + detection age
+                delta_relative_ball_pos_xy * self.cfg["normalization"]["ball_pos"],  # 2
+                detection_age_obs,  # 1
                 # Gait process (same as walking model)
                 (torch.cos(2 * torch.pi * self.gait_process)).unsqueeze(-1),  # 1
                 (torch.sin(2 * torch.pi * self.gait_process)).unsqueeze(-1),  # 1
@@ -1130,9 +1381,57 @@ class BallControlK1(BaseTask):
         self.extras["privileged_obs"] = self.privileged_obs_buf
 
     # ------------ reward functions----------------
+    def _upright_posture_term(self):
+        # Uprightness from roll/pitch error in world frame.
+        roll, pitch, _ = get_euler_xyz(self.base_quat)
+        roll = (roll + torch.pi) % (2 * torch.pi) - torch.pi
+        pitch = (pitch + torch.pi) % (2 * torch.pi) - torch.pi
+        sigma = self.cfg["rewards"].get("upright_sigma", 0.10)
+        return torch.exp(-(torch.square(roll) + torch.square(pitch)) / sigma)
+
+    def _stability_gate(self):
+        # Soft gate to unlock approach/receive rewards once robot is somewhat upright and tall enough.
+        base_height = self.base_pos[:, 2] - self.terrain.terrain_heights(self.base_pos)
+        gate_height = self.cfg["rewards"].get("stability_gate_height", 0.46)
+        gate_sigma = self.cfg["rewards"].get("stability_gate_sigma", 0.03)
+        return torch.sigmoid((base_height - gate_height) / gate_sigma) * self._upright_posture_term()
+
     def _reward_survival(self):
         # Reward survival
         return torch.ones(self.num_envs, dtype=torch.float, device=self.device)
+
+    def _reward_upright_posture(self):
+        return self._upright_posture_term()
+
+    def _reward_standing_stability(self):
+        # Encourage low planar linear/angular base velocities for stand-and-balance behavior.
+        lin_vel_sigma = self.cfg["rewards"].get("standing_lin_vel_sigma", 0.35)
+        ang_vel_sigma = self.cfg["rewards"].get("standing_ang_vel_sigma", 1.0)
+        lin_term = torch.exp(-torch.sum(torch.square(self.filtered_lin_vel[:, 0:2]), dim=-1) / lin_vel_sigma)
+        ang_term = torch.exp(-torch.sum(torch.square(self.filtered_ang_vel[:, 0:2]), dim=-1) / ang_vel_sigma)
+        return lin_term * ang_term
+
+    def _reward_approach_progress(self):
+        # Reward only positive progress in robot-ball distance.
+        distance = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
+        delta = self.last_ball_distance_to_robot - distance
+        clip_value = max(float(self.cfg["rewards"].get("approach_progress_clip", 0.03)), 1.0e-6)
+        progress = torch.clamp(delta, min=0.0, max=clip_value) / clip_value
+        return progress
+
+    def _reward_receive_zone_control(self):
+        # Reward controlling the ball near the robot with low ball speed.
+        distance = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
+        ball_speed_xy = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        dist_sigma = self.cfg["rewards"].get("receive_dist_sigma", 0.20)
+        speed_sigma = self.cfg["rewards"].get("receive_speed_sigma", 0.12)
+        r_dist = torch.exp(-torch.square(distance) / dist_sigma)
+        r_speed = torch.exp(-torch.square(ball_speed_xy) / speed_sigma)
+        # Time decay — early ball control is much more valuable
+        episode_time = self.episode_length_buf.float() * self.dt
+        tau = float(self.cfg["rewards"].get("ball_reward_time_decay_tau", 3.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+        return self._stability_gate() * r_dist * r_speed * time_multiplier
 
     def _reward_tracking_lin_vel_x(self):
         # Tracking of linear velocity commands (x axes)
@@ -1487,7 +1786,7 @@ class BallControlK1(BaseTask):
         ball_dir = ball_vel_xy / (ball_speed + 1e-8)
         moving_ball = ball_speed.squeeze(-1) > self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1)
 
-        dribble_offset = (0.1 + self.ball_radii)
+        dribble_offset = (0.1 + self.ball_radii).unsqueeze(-1)
         receive_offset = self.cfg["rewards"].get("ball_receive_intercept_offset", 0.25)
 
         target_pos_dribble = ball_pos - dribble_offset * normed_commands
@@ -1515,7 +1814,7 @@ class BallControlK1(BaseTask):
 
     def _reward_ball_height_penalty(self):
         """Penalizes ball being off the ground (kicked too hard upward)"""
-        ball_height = self.ball_pos[:, 2] - self.ball_radius
+        ball_height = self.ball_pos[:, 2] - self.ball_radii
         
         # Only penalize if ball is significantly above ground
         height_error = torch.clamp(ball_height - 0.02, min=0.0)
@@ -1566,4 +1865,277 @@ class BallControlK1(BaseTask):
         target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
         no_target = target_speed <= 1e-6
 
-        return near_start_reward * stop_gate * no_target.float()
+        # Time decay — early stopping is much more valuable
+        episode_time = self.episode_length_buf.float() * self.dt
+        tau = float(self.cfg["rewards"].get("ball_reward_time_decay_tau", 3.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+        return self._stability_gate() * near_start_reward * stop_gate * no_target.float() * time_multiplier
+
+    def _reward_perceived_intercept_timing(self):
+        """Reward early interception alignment using perceived current and lagged ball positions."""
+        perceived_delta_xy = self.perceived_ball_pos_relative - self.lagged_perceived_ball_pos_relative
+        delta_norm = torch.norm(perceived_delta_xy, dim=-1, keepdim=True)
+        perceived_dir = perceived_delta_xy / (delta_norm + 1e-8)
+
+        # Robot is at origin in robot frame; vector from ball to robot is negative perceived ball pos.
+        ball_to_robot_xy = -self.perceived_ball_pos_relative
+        lateral_dist = torch.abs(
+            perceived_dir[:, 0] * ball_to_robot_xy[:, 1] - perceived_dir[:, 1] * ball_to_robot_xy[:, 0]
+        )
+        forward_proj = torch.sum(ball_to_robot_xy * perceived_dir, dim=-1)
+
+        lateral_sigma = max(float(self.cfg["rewards"].get("perceived_intercept_lateral_sigma", 0.12)), 1e-6)
+        forward_min = float(self.cfg["rewards"].get("perceived_intercept_forward_min", 0.05))
+        forward_sigma = max(float(self.cfg["rewards"].get("perceived_intercept_forward_sigma", 0.08)), 1e-6)
+        min_delta = max(float(self.cfg["rewards"].get("perceived_intercept_min_delta", 0.01)), 1e-6)
+
+        lateral_term = torch.exp(-torch.square(lateral_dist) / lateral_sigma)
+        forward_term = torch.sigmoid((forward_proj - forward_min) / forward_sigma)
+        motion_gate = (delta_norm.squeeze(-1) > min_delta).float()
+
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        receive_mode_eps = float(self.cfg["rewards"].get("receive_mode_target_speed_eps", 1e-6))
+        receive_mode_gate = (target_speed <= receive_mode_eps).float()
+        return self._stability_gate() * lateral_term * forward_term * motion_gate * receive_mode_gate
+
+    def _reward_shot_path_alignment(self):
+        """Reward standing on the incoming ball path and slightly ahead of the ball."""
+
+        ball_vel_xy = self.ball_lin_vel[:, 0:2]
+        ball_speed = torch.norm(ball_vel_xy, dim=-1)
+
+        vel_norm = ball_vel_xy / (ball_speed.unsqueeze(-1) + 1e-8)
+
+        rel_ball_robot = self.base_pos[:, 0:2] - self.ball_pos[:, 0:2]
+
+        lateral_dist = torch.abs(vel_norm[:, 0] * rel_ball_robot[:, 1] - vel_norm[:, 1] * rel_ball_robot[:, 0])
+
+        forward_proj = torch.sum(rel_ball_robot * vel_norm, dim=-1)
+
+        shot_path_lateral_s = max(float(self.cfg["rewards"].get("shot_path_lateral_sigma", 0.10)), 1e-6)
+        r_lateral = torch.exp(-torch.square(lateral_dist) / shot_path_lateral_s)
+        
+        shot_path_forward_s = max(float(self.cfg["rewards"].get("shot_path_forward_sigma", 0.08)), 1e-6)
+        shot_path_forward_min = float(self.cfg["rewards"].get("shot_path_forward_min", 0.05))
+        r_forward = torch.sigmoid((forward_proj - shot_path_forward_min) / shot_path_forward_s)
+
+        reward = r_lateral * r_forward
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        receive_mode_eps = float(self.cfg["rewards"].get("receive_mode_target_speed_eps", 1e-6))
+        min_ball_speed = float(self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1))
+        receive_mode_gate = target_speed <= receive_mode_eps
+        moving_ball_gate = ball_speed > min_ball_speed
+        gate = (receive_mode_gate & moving_ball_gate).float()
+        return reward * gate
+
+    def _reward_incoming_source_position(self):
+        """Reward standing on the side the ball originally came from."""
+        source_dir = -self.pass_ref_dir_xy
+        rel_ball_robot = self.base_pos[:, 0:2] - self.ball_pos[:, 0:2]
+
+        # Keep the robot close to the original incoming line.
+        lateral_dist = torch.abs(source_dir[:, 0] * rel_ball_robot[:, 1] - source_dir[:, 1] * rel_ball_robot[:, 0])
+        lateral_sigma = max(float(self.cfg["rewards"].get("incoming_source_lateral_sigma", 0.10)), 1e-6)
+        lateral_term = torch.exp(-torch.square(lateral_dist) / lateral_sigma)
+
+        # Reward being on the source side of the ball.
+        source_proj = torch.sum(rel_ball_robot * source_dir, dim=-1)
+        source_min = float(self.cfg["rewards"].get("incoming_source_forward_min", 0.05))
+        source_sigma = max(float(self.cfg["rewards"].get("incoming_source_forward_sigma", 0.08)), 1e-6)
+        source_term = torch.sigmoid((source_proj - source_min) / source_sigma)
+
+        reward = lateral_term * source_term
+
+        # Apply in receive mode when ball is moving.
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        receive_mode_eps = float(self.cfg["rewards"].get("receive_mode_target_speed_eps", 1e-6))
+        min_ball_speed = float(self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1))
+        ball_speed = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        receive_mode_gate = target_speed <= receive_mode_eps
+        moving_ball_gate = ball_speed > min_ball_speed
+        gate = (receive_mode_gate & moving_ball_gate).float()
+
+        return reward * gate
+
+    def _reward_ball_passed_behind_penalty(self):
+        """Penalty when ball passed behind robot and is still moving away."""
+        target_speed = torch.norm(self.commands[:, 0:2], dim=-1)
+        receive_mode_eps = float(self.cfg["rewards"].get("receive_mode_target_speed_eps", 1e-6))
+        receive_mode_gate = (target_speed <= receive_mode_eps).float()
+
+        shot_dir = self.pass_ref_dir_xy
+
+        # Use current robot pose so "passed" means passed the robot, not just the reset origin.
+        rel_ball_robot = self.ball_pos[:, 0:2] - self.base_pos[:, 0:2]
+        progress_along_shot = torch.sum(rel_ball_robot * shot_dir, dim=-1)
+        margin_x = float(self.cfg["rewards"].get("ball_passed_margin_x", 0.08))
+        depth_cap = max(float(self.cfg["rewards"].get("ball_passed_depth_cap", 0.5)), 1e-6)
+        behind_depth = torch.clamp(progress_along_shot - margin_x, min=0.0, max=depth_cap) / depth_cap
+
+        ball_vel_xy = self.ball_lin_vel[:, 0:2]
+        away_dot = torch.sum(ball_vel_xy * shot_dir, dim=-1)
+
+        away_min = float(self.cfg["rewards"].get("ball_passed_away_min", 0.04))
+        away_sigma = max(float(self.cfg["rewards"].get("ball_passed_away_sigma", 0.10)), 1e-6)
+        away_gate = torch.sigmoid((away_dot - away_min) / away_sigma)
+
+        ball_speed = torch.norm(ball_vel_xy, dim=-1)
+        min_passed_speed = float(self.cfg["rewards"].get("ball_passed_speed_threshold", 0.12))
+        speed_sigma = max(float(self.cfg["rewards"].get("ball_passed_speed_sigma", 0.04)), 1e-6)
+        speed_gate = torch.sigmoid((ball_speed - min_passed_speed) / speed_sigma)
+
+        # Reduce penalty when the ball is far off the incoming line.
+        lateral_dist = torch.abs(shot_dir[:, 0] * rel_ball_robot[:, 1] - shot_dir[:, 1] * rel_ball_robot[:, 0])
+        lateral_sigma = max(float(self.cfg["rewards"].get("ball_passed_lateral_sigma", 0.25)), 1e-6)
+        lateral_gate = torch.exp(-torch.square(lateral_dist) / lateral_sigma)
+
+        return behind_depth * away_gate * speed_gate * lateral_gate * receive_mode_gate
+
+    # =========================================================================
+    # NEW — Active interception (anti-exploit) rewards
+    # =========================================================================
+
+    def _reward_interception_time_bonus(self):
+        """Large one-shot bonus when robot first causes ball to decelerate.
+
+        Decays exponentially with episode time.  Earlier interception = much more reward.
+        Natural friction is filtered out by a minimum speed-drop threshold.
+        Uses a boolean latch (ball_has_been_contacted) instead of float('inf') sentinel.
+        Contact detection logic is kept inside the reward for simplicity; it only
+        writes to the latch buffer which no other reward reads during the same step.
+        """
+        episode_time = self.episode_length_buf.float() * self.dt
+
+        # Current and previous ball speed
+        ball_speed_now = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        ball_speed_prev = torch.norm(self.last_ball_lin_vel_world[:, 0:2], dim=-1)
+        speed_drop = ball_speed_prev - ball_speed_now
+
+        # Only count drops that exceed natural friction
+        min_delta = float(self.cfg["rewards"].get("interception_min_speed_drop", 0.15))
+        significant_impact = speed_drop > min_delta
+
+        # Robot foot must be close to ball
+        foot_to_ball = self.ball_pos[:, 0:2].unsqueeze(1) - self.feet_pos[:, :, 0:2]
+        min_foot_dist = torch.norm(foot_to_ball, dim=-1).min(dim=1).values
+        foot_radius = float(self.cfg["rewards"].get("interception_foot_radius", 0.20))
+        robot_close = min_foot_dist < foot_radius
+
+        # Ball was actually moving
+        min_speed = float(self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1))
+        was_moving = ball_speed_prev > min_speed
+
+        # Latch first contact (fires once per episode)
+        first_contact_now = significant_impact & robot_close & was_moving
+        newly_contacted = first_contact_now & (~self.ball_has_been_contacted)
+        self.ball_has_been_contacted[newly_contacted] = True
+        self.ball_first_contact_time[newly_contacted] = episode_time[newly_contacted]
+
+        # Time-decayed bonus
+        tau = float(self.cfg["rewards"].get("interception_time_tau", 2.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+
+        # Fire bonus only on the step of first contact
+        bonus = newly_contacted.float() * time_multiplier
+
+        return bonus * self.receive_mode_mask
+
+    def _reward_ball_speed_reduction(self):
+        """Reward ball deceleration CAUSED BY robot contact, not natural friction.
+
+        Only rewards speed drops greater than a per-step threshold that filters
+        out friction-induced deceleration.
+        """
+        ball_speed_now = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        ball_speed_prev = torch.norm(self.last_ball_lin_vel_world[:, 0:2], dim=-1)
+        speed_drop = ball_speed_prev - ball_speed_now
+
+        # Filter out natural friction
+        min_delta = float(self.cfg["rewards"].get("ball_speed_reduction_min_delta", 0.08))
+        impact_speed_drop = torch.clamp(speed_drop - min_delta, min=0.0)
+
+        # Robot foot must be near ball (Gaussian gate aligned with interception_foot_radius)
+        foot_to_ball = self.ball_pos[:, 0:2].unsqueeze(1) - self.feet_pos[:, :, 0:2]
+        min_foot_dist = torch.norm(foot_to_ball, dim=-1).min(dim=1).values
+        proximity_sigma = float(self.cfg["rewards"].get("ball_speed_reduction_proximity_sigma", 0.10))
+        proximity_gate = torch.exp(-torch.square(min_foot_dist) / proximity_sigma)
+
+        # Ball was moving
+        min_speed = float(self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1))
+        was_moving = (ball_speed_prev > min_speed).float()
+
+        return impact_speed_drop * proximity_gate * was_moving * self.receive_mode_mask
+
+    def _reward_foot_ball_proximity(self):
+        """Reward feet being close to a moving ball — encourages physical blocking."""
+        # Closest foot to ball
+        foot_to_ball = self.ball_pos[:, 0:2].unsqueeze(1) - self.feet_pos[:, :, 0:2]
+        foot_ball_dist = torch.norm(foot_to_ball, dim=-1)           # (N, 2)
+        min_dist = foot_ball_dist.min(dim=1).values                 # (N,)
+
+        sigma = float(self.cfg["rewards"].get("foot_ball_proximity_sigma", 0.15))
+        proximity_reward = torch.exp(-torch.square(min_dist) / sigma)
+
+        # Only when ball is moving
+        ball_speed = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        min_speed = float(self.cfg["rewards"].get("ball_vel_tracking_min_speed", 0.1))
+        moving_gate = (ball_speed > min_speed).float()
+
+        return proximity_reward * moving_gate * self.receive_mode_mask
+
+    def _reward_ball_in_front_after_stop(self):
+        """Reward ball being in front of the robot (local frame) when ball is slow.
+
+        Teaches the robot to trap the ball on its front side, not let it
+        ricochet sideways or behind.  Time-decayed to discourage passive waiting.
+        """
+        # Ball position in robot local frame
+        ball_rel_world = self.ball_pos[:, :3] - self.base_pos[:, :3]
+        ball_rel_local = quat_rotate_inverse(self.base_quat, ball_rel_world)
+
+        # Positive local-x = in front of robot
+        forward_proj = torch.clamp(ball_rel_local[:, 0], min=0.0, max=0.5) / 0.5
+
+        # Ball distance gate
+        ball_dist = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
+        dist_sigma = float(self.cfg["rewards"].get("ball_in_front_dist_sigma", 0.30))
+        dist_gate = torch.exp(-torch.square(ball_dist) / dist_sigma)
+
+        # Low ball speed gate
+        ball_speed = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1)
+        speed_sigma = float(self.cfg["rewards"].get("ball_in_front_speed_sigma", 0.30))
+        slow_gate = torch.exp(-ball_speed / speed_sigma)
+
+        # Time decay
+        episode_time = self.episode_length_buf.float() * self.dt
+        tau = float(self.cfg["rewards"].get("ball_reward_time_decay_tau", 3.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+
+        return forward_proj * dist_gate * slow_gate * time_multiplier * self.receive_mode_mask
+
+    def _reward_ball_travel_penalty(self):
+        """Penalise how far the ball has progressed along the original shot direction.
+
+        The tracked value (ball_max_progress_along_shot) can only increase,
+        so the robot cannot erase it by walking to the ball after it stops.
+        Early interception keeps this value small.
+
+        Uses delta formulation: penalises the *increase* in max-progress this step,
+        avoiding quadratic accumulation of a monotonically growing value.
+        """
+        # Current progress (already computed and stored in step())
+        rel_ball_origin = self.ball_pos[:, 0:2] - self.pass_ref_origin_xy
+        progress = torch.sum(rel_ball_origin * self.pass_ref_dir_xy, dim=-1) - self.ball_initial_progress
+
+        max_dist = float(self.cfg["rewards"].get("ball_travel_penalty_max", 5.0))
+        # Normalised current progress (0-1)
+        normalized_now = torch.clamp(progress / max_dist, 0.0, 1.0)
+        # Normalised previous max progress (0-1)
+        normalized_prev = torch.clamp(
+            (self.ball_max_progress_along_shot - (progress - progress)) / max_dist, 0.0, 1.0
+        )
+        # Delta: only penalise new progress this step
+        # Since ball_max_progress_along_shot was already updated, we use the current value
+        normalized_max = torch.clamp(self.ball_max_progress_along_shot / max_dist, 0.0, 1.0)
+
+        return normalized_max * self.receive_mode_mask
