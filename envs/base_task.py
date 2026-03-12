@@ -134,6 +134,11 @@ class BaseTask:
                 camera_props.height = 720
                 camera_props.use_collision_geometry = False
                 self.camera = self.gym.create_camera_sensor(self.envs[self.cfg["viewer"]["record_env_idx"]], camera_props)
+                if self.camera == -1:
+                    raise RuntimeError(
+                        "Failed to create camera sensor. Video recording requires a valid graphics device; "
+                        "ensure `viewer.record_video` is enabled before environment initialization."
+                    )
                 self.camera_frames = []
 
             if self.root_states[self.cfg["viewer"]["record_env_idx"]].ndim == 2:
@@ -150,5 +155,7 @@ class BaseTask:
             self.gym.set_camera_location(self.camera, self.envs[self.cfg["viewer"]["record_env_idx"]], cam_pos, cam_target)
             self.gym.render_all_camera_sensors(self.sim)
             img = self.gym.get_camera_image(self.sim, self.envs[self.cfg["viewer"]["record_env_idx"]], self.camera, gymapi.IMAGE_COLOR)
+            if img.size == 0:
+                raise RuntimeError("Camera returned an empty image while recording video.")
             self.camera_frames.append(img.reshape(img.shape[0], -1, 4))
             

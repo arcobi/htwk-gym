@@ -203,7 +203,9 @@ class Runner:
                     self.cfg["env"][arg] = getattr(self.args, arg)
                 else:
                     self.cfg["basic"][arg] = getattr(self.args, arg)
-        if not self.test:
+        if self.args.record_video_mode:
+            self.cfg["viewer"]["record_video"] = True
+        elif not self.test:
             # Disable video recording in training process - videos will be recorded in separate process
             self.cfg["viewer"]["record_video"] = False
 
@@ -264,6 +266,8 @@ class Runner:
 
     def train(self):
         self.recorder = Recorder(self.cfg)
+        if hasattr(self.env, "update_training_curriculum"):
+            self.env.update_training_curriculum(0)
         obs, infos = self.env.reset()
         obs = obs.to(self.device)
         privileged_obs = infos["privileged_obs"].to(self.device)
@@ -277,8 +281,12 @@ class Runner:
         if log_video_interval is not None and log_video_interval <= 0:
             log_video_interval = None
         log_video_duration = self.cfg["runner"].get("log_video_duration", 10.0)
+        log_reward_terms = self.cfg["runner"].get("log_reward_terms", False)
+        log_env_metrics = self.cfg["runner"].get("log_env_metrics", False)
         
         for it in range(self.cfg["basic"]["max_iterations"]):
+            if hasattr(self.env, "update_training_curriculum"):
+                self.env.update_training_curriculum(it)
             # Check if it's time to log a video
             should_log_video = (use_wandb and 
                                log_video_interval is not None and 
@@ -332,8 +340,9 @@ class Runner:
                 self.buffer.update_data("dones", n, done)
                 self.buffer.update_data("time_outs", n, infos["time_outs"].to(self.device))
                 ep_info = {"reward": rew}
-                ep_info.update(infos["rew_terms"])
-                if "metrics" in infos:
+                if log_reward_terms:
+                    ep_info.update(infos["rew_terms"])
+                if log_env_metrics and "metrics" in infos and bool(done.any().item()):
                     ep_info.update(infos["metrics"])
                 self.recorder.record_episode_statistics(done, ep_info, it, n == (self.cfg["runner"]["horizon_length"] - 1))
 
@@ -449,6 +458,13 @@ class Runner:
                     "curriculum/mean_ang_vel_level": self.env.mean_ang_vel_level,
                     "curriculum/max_lin_vel_level": self.env.max_lin_vel_level,
                     "curriculum/max_ang_vel_level": self.env.max_ang_vel_level,
+                    "training_phase/index": float(getattr(self.env, "training_phase_index", 0)),
+                    "training_phase/progress": float(getattr(self.env, "training_phase_progress", 0.0)),
+                    "training_phase/locomotion_core": float(getattr(self.env, "reward_group_multipliers", {}).get("locomotion_core", 1.0)),
+                    "training_phase/approach_core": float(getattr(self.env, "reward_group_multipliers", {}).get("approach_core", 1.0)),
+                    "training_phase/failure_core": float(getattr(self.env, "reward_group_multipliers", {}).get("failure_core", 1.0)),
+                    "training_phase/intercept_core": float(getattr(self.env, "reward_group_multipliers", {}).get("intercept_core", 1.0)),
+                    "training_phase/control_core": float(getattr(self.env, "reward_group_multipliers", {}).get("control_core", 1.0)),
                 },
                 it,
             )

@@ -1,0 +1,482 @@
+basic:
+  checkpoint: null
+  headless: true
+  max_iterations: 15000
+  sim_device: "cuda:0"
+  rl_device: "cuda:0"
+  seed: -1
+  description: ""
+  debug_termination: true
+  debug_termination_interval: 100
+  debug_termination_max_envs: 5
+  debug_termination_env_id: 0
+  task: "K1/PassReceiveHighLevel"
+  model: "BaseActorCritic"
+
+env:
+  num_envs: 2048
+  num_observations: 90
+  num_privileged_obs: 55
+  num_actions: 13
+  env_spacing: 3.0
+  detection_history_len: 6
+
+runner:
+  horizon_length: 48
+  mini_epochs: 10
+  save_interval: 1000
+  use_wandb: true
+  log_video_interval: 500
+  log_video_duration: 30.0
+  log_reward_terms: true
+  log_env_metrics: true
+
+viewer:
+  pos: [3.0, -3.0, 2.0]
+  lookat: [0.0, 0.0, 0.0]
+  record_video: true
+  record_interval: 60.0
+  record_env_idx: 0
+  show_debug_viz: true
+  debug_env_count: 1
+  debug_video_overlay: true
+  debug_video_panel_size: 220
+  debug_video_scale: 120.0
+
+algorithm:
+  learning_rate: 5.0e-6
+  gamma: 0.995
+  lam: 0.95
+  bound_coef: 1.0
+  entropy_coef: -0.01
+  symmetric_coef: 10.0
+  desired_kl: 0.02
+  value_clip_param: 0.2
+  min_entropy: -18
+  max_entropy: -5.0
+
+sim:
+  dt: 0.002
+  substeps: 1
+  up_axis: "z"
+  gravity: [0.0, 0.0, -9.81]
+  physics_engine: "physx"
+  physx:
+    num_threads: 4
+    solver_type: 1
+    num_position_iterations: 8
+    num_velocity_iterations: 4
+    contact_offset: 0.02
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.2
+    max_depenetration_velocity: 1.0
+    default_buffer_size_multiplier: 5.0
+    max_gpu_contact_pairs: 8388608
+    num_subscenes: 4
+    contact_collection: 1
+
+asset:
+  file: "resources/K1/K1_locomotion.urdf"
+  name: "K1"
+  base_name: "Trunk"
+  foot_names: ["left_foot_link", "right_foot_link"]
+  disable_gravity: false
+  default_dof_drive_mode: 3
+  collapse_fixed_joints: true
+  fix_base_link: false
+  self_collisions: 0
+  replace_cylinder_with_capsule: false
+  flip_visual_attachments: false
+  density: 0.001
+  angular_damping: 0.0
+  linear_damping: 0.0
+  max_angular_velocity: 1000.0
+  max_linear_velocity: 1000.0
+  armature: 0.0
+  thickness: 0.01
+  feet_edge_pos: [[ 0.1215,  0.05, -0.03],
+                  [ 0.1215, -0.05, -0.03],
+                  [-0.1015,  0.05, -0.03],
+                  [-0.1015, -0.05, -0.03]]
+
+ball:
+  name: "ball"
+  radius: 0.095
+  mass: 0.28
+  init_pos: [0.3, 0.0, 0.105]
+  init_rot: [0.0, 0.0, 0.0, 1.0]
+  init_lin_vel: [0.0, 0.0, 0.0]
+  init_ang_vel: [0.0, 0.0, 0.0]
+  restitution: 0.1
+  friction: 1.0
+  rolling_friction: 0.3
+  torsion_friction: 0.1
+  density: 200
+  detection_fps: 30.0
+  detection_fps_jitter: 0.15
+  detection_dropout_prob: 0.08
+  detection_age_clip_s: 0.25
+
+init_state:
+  pos: [0.0, 0.0, 0.70]
+  rot: [0.0, 0.0, 0.0, 1.0]
+  lin_vel: [0.0, 0.0, 0.0]
+  ang_vel: [0.0, 0.0, 0.0]
+  ball_pos: [0.5, 0.0, 0.105]
+  default_joint_angles: {"Hip_Pitch": -0.2, "Knee_Pitch": 0.4, "Ankle_Pitch": -0.25, "default": 0.0}
+
+control:
+  stiffness: {"Hip_Pitch": 80.0, "Hip_Roll": 80.0, "Hip_Yaw": 80.0, "Knee": 80.0, "Ankle": 30.0}
+  damping: {"Hip_Pitch": 2.0, "Hip_Roll": 2.0, "Hip_Yaw": 2.0, "Knee": 2.0, "Ankle": 2.0}
+  armature: {"Hip_Pitch": 0.0478125, "Hip_Roll": 0.0339552, "Hip_Yaw": 0.0282528, "Knee": 0.095625, "Ankle": 0.0565056}
+  effort_limit: {"Hip_Pitch": 30.0, "Hip_Roll": 35.0, "Hip_Yaw": 20.0, "Knee": 40.0, "Ankle": 20.0}
+  velocity_limit: {"Hip_Pitch": 8.0, "Hip_Roll": 12.9, "Hip_Yaw": 18.0, "Knee": 12.5, "Ankle": 18.0}
+  action_scale: 1.0
+  decimation: 10
+
+terrain:
+  type: "plane"
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.0
+  terrain_length: 10.0
+  terrain_width: 10.0
+  border_size: 5.0
+  num_terrains: 8
+  terrain_proportions: [0.0, 0.0, 0.5, 0.5]
+  slope: 0.1
+  random_height: 0.1
+  discrete_height: 0.02
+  horizontal_scale: 0.1
+  vertical_scale: 0.005
+  slope_threshold: 2.0
+
+commands:
+  gait_frequency_base: 2.0
+  gait_frequency_offset_clip: 0.5
+
+normalization:
+  gravity: 1.0
+  lin_vel: 1.0
+  ang_vel: 1.0
+  gait_frequency: 1.0
+  dof_pos: 1.0
+  dof_vel: 0.1
+  filter_weight: 0.1
+  dof_vel_filter_alpha: 0.1
+  push_force: 0.1
+  push_torque: 0.5
+  clip_actions: 1.0
+  ball_pos: 0.33333333333
+  ball_detection_age: 4.0
+  intercept_time: 0.75
+
+noise:
+  gravity:
+    range: [0.0, 0.01]
+    operation: "additive"
+    distribution: "gaussian"
+  lin_vel:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  ang_vel:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_pos:
+    range: [0.0, 0.01]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_vel:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  ball_pos:
+    range: [-0.03, 0.03]
+    operation: "additive"
+    distribution: "gaussian"
+
+randomization:
+  init_dof_pos:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  init_base_pos_xy:
+    range: [-0.35, 0.35]
+    operation: "additive"
+    distribution: "uniform"
+  init_base_lin_vel_xy:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  init_base_ang:
+    range: [-0.08, 0.08]
+    operation: "additive"
+    distribution: "gaussian"
+  ball_radius:
+    range: [-0.01, 0.01]
+    operation: "additive"
+    distribution: "uniform"
+  ball_mass:
+    range: [-0.02, 0.02]
+    operation: "additive"
+    distribution: "uniform"
+  ball_restitution:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  ball_friction:
+    range: [0.9, 1.1]
+    operation: "scaling"
+    distribution: "uniform"
+  ball_rolling_friction:
+    range: [0.9, 1.1]
+    operation: "scaling"
+    distribution: "uniform"
+  ball_torsion_friction:
+    range: [0.9, 1.1]
+    operation: "scaling"
+    distribution: "uniform"
+  ball_density:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  ball_init_ang_vel_x:
+    range: [-1.0, 1.0]
+    operation: "additive"
+    distribution: "uniform"
+  ball_init_ang_vel_y:
+    range: [-1.0, 1.0]
+    operation: "additive"
+    distribution: "uniform"
+  ball_init_ang_vel_z:
+    range: [-2.0, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  kick_interval_s: 5.0
+  kick_lin_vel:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  kick_ang_vel:
+    range: [0.0, 0.03]
+    operation: "additive"
+    distribution: "gaussian"
+  push_interval_s: 5.0
+  push_duration_s: 1.0
+  push_force:
+    range: [0.0, 10.0]
+    operation: "additive"
+    distribution: "gaussian"
+  push_torque:
+    range: [0.0, 1.5]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_stiffness:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  dof_damping:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  dof_friction:
+    range: [0.0, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  friction:
+    range: [0.1, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  compliance:
+    range: [0.5, 1.5]
+    operation: "additive"
+    distribution: "uniform"
+  restitution:
+    range: [0.1, 0.9]
+    operation: "additive"
+    distribution: "uniform"
+  base_com:
+    range: [-0.1, 0.1]
+    operation: "additive"
+    distribution: "uniform"
+  base_mass:
+    range: [0.8, 1.2]
+    operation: "scaling"
+    distribution: "uniform"
+  other_com:
+    range: [-0.005, 0.005]
+    operation: "additive"
+    distribution: "uniform"
+  other_mass:
+    range: [0.98, 1.02]
+    operation: "scaling"
+    distribution: "uniform"
+
+estimator:
+  history_time_scale: 0.20
+  min_speed_for_fit: 0.10
+  speed_conf_sigma: 0.08
+  fit_residual_sigma: 0.02
+  max_recent_age: 0.25
+  receive_plane_x: 0.08
+  min_plane_speed: 0.05
+  time_clip_s: 2.0
+  low_confidence_threshold: 0.35
+
+receive_geometry:
+  foot_forward_contact_offset: 0.03
+  foot_inner_contact_offset: 0.04
+  robot_nominal_reposition_speed: 0.25
+  safe_gap_margin: 0.005
+  wide_gap_target: 0.05
+  capture_zone_center: [0.18, 0.0]
+  capture_zone_sigma: [0.16, 0.12]
+  capture_speed_threshold: 0.18
+  capture_front_min: 0.04
+  capture_lateral_max: 0.18
+
+turn_guard:
+  receive_heading_side_bias: 0.22
+  heading_reward_sigma: 0.18
+  hard_heading_error: 1.45
+  behind_ball_x_margin: 0.10
+  late_chase_progress_ratio: 0.90
+  late_chase_grace_s: 0.35
+  late_chase_robot_lag_margin: 0.20
+  late_chase_ball_x_threshold: 0.00
+  orbit_heading_threshold: 1.80
+  orbit_ball_distance: 0.28
+  orbit_progress_threshold: 0.70
+  progress_penalty_distance: 1.20
+
+locomotion_targets:
+  position_gain_x: 2.2
+  position_gain_y: 4.6
+  heading_gain: 2.4
+  max_lin_vel_x: 0.30
+  max_lin_vel_y: 0.85
+  max_ang_vel_yaw: 1.80
+  idle_gait_frequency: 1.60
+  active_gait_frequency: 2.50
+  near_distance: 0.05
+  drive_sigma: 0.03
+  step_required_distance: 0.08
+  step_frequency_threshold: 1.20
+  locomotion_speed_threshold: 0.08
+  skate_speed_threshold: 0.10
+  forward_clip: 0.06
+  lateral_error_weight: 1.8
+  forward_error_weight: 0.6
+
+contact_classifier:
+  side_lock_conf_threshold: 0.55
+  inner_side_forward_tolerance: 0.06
+  inner_side_lateral_tolerance: 0.05
+  inner_side_min_projection: 0.01
+  toe_forward_min: 0.09
+  toe_lateral_max: 0.05
+  other_foot_radius: 0.17
+  support_foot_speed_max: 0.35
+  body_contact_force_threshold: 1.0
+
+curriculum:
+  enabled: true
+  evaluation_window: 256
+  advance_threshold: 0.65
+  retreat_threshold: 0.25
+  num_levels: 4
+
+pass_generator:
+  family_weights:
+    - [0.05, 0.28, 0.00, 0.16, 0.16, 0.18, 0.17]
+    - [0.10, 0.25, 0.05, 0.18, 0.18, 0.12, 0.12]
+    - [0.16, 0.22, 0.12, 0.16, 0.16, 0.09, 0.09]
+    - [0.20, 0.18, 0.18, 0.16, 0.16, 0.06, 0.06]
+  distance_min: [0.75, 0.90, 1.10, 1.35]
+  distance_max: [1.05, 1.25, 1.55, 1.95]
+  speed_min: [0.45, 0.60, 0.85, 1.10]
+  speed_max: [0.75, 0.95, 1.20, 1.55]
+  fast_speed_min: [0.90, 1.10, 1.40, 1.75]
+  fast_speed_max: [1.10, 1.35, 1.70, 2.05]
+  target_x_min: [0.05, 0.05, 0.04, 0.04]
+  target_x_max: [0.14, 0.14, 0.12, 0.12]
+  target_y_max: [0.18, 0.20, 0.22, 0.24]
+  centerline_target_sigma: [0.02, 0.03, 0.04, 0.05]
+  center_angle_deg_std: [3.0, 5.0, 7.0, 9.0]
+  shallow_angle_deg_min: [12.0, 14.0, 16.0, 18.0]
+  shallow_angle_deg_max: [18.0, 22.0, 26.0, 30.0]
+  short_distance_min: [0.55, 0.65, 0.75, 0.85]
+  short_distance_max: [0.85, 0.95, 1.05, 1.15]
+  short_speed_min: [0.35, 0.45, 0.55, 0.65]
+  short_speed_max: [0.65, 0.80, 0.95, 1.05]
+  foot_target_y: [0.13, 0.14, 0.15, 0.16]
+
+rewards:
+  scales:
+    survival: 0.20
+    stability: 0.75
+    intercept_pos: 2.0
+    intercept_time: 1.5
+    heading: 0.6
+    side_foot_yaw: 1.5
+    stance_narrow_when_needed: 1.4
+    no_tunnel: 2.0
+    contact_quality: 3.0
+    capture_zone: 2.4
+    tracking_lin_vel_x: 0.9
+    tracking_lin_vel_y: 1.0
+    tracking_ang_vel: 0.7
+    gait_frequency_tracking: 0.4
+    base_height: -4.0
+    orientation: -5.0
+    feet_distance: -2.0
+    feet_slip: -0.12
+    feet_swing: 1.1
+    swing_clearance: 1.2
+    step_lateral_progress: 1.5
+    skate_penalty: -4.0
+    double_support_shuffle_penalty: -3.5
+    stance_width_hard_penalty: -6.0
+    turn_guard_penalty: -4.0
+    pass_progress_penalty: -1.5
+    wrong_surface_penalty: -5.0
+    action_smoothness: -0.08
+    through_legs_penalty: -6.0
+    clear_miss_penalty: -2.0
+  only_positive_rewards: false
+  episode_length_s: 12.0
+  terminate_height: 0.34
+  terminate_lin_vel: 5.0
+  terminate_ang_vel: 9.0
+  terminate_contacts_on: []
+  penalize_contacts_on: ["Trunk", "H1", "H2", "AL", "AR", "Waist", "Hip", "Shank", "Ankle"]
+  clear_miss_termination_s: 0.35
+  clear_miss_x_margin: 0.10
+  intercept_window_s: 0.35
+  intercept_pos_sigma: 0.05
+  intercept_time_sigma: 0.06
+  tracking_sigma: 0.25
+  gait_frequency_sigma: 0.20
+  base_height_target: 0.54
+  feet_distance_ref: 0.192
+  stance_gap_sigma: 0.003
+  centerline_sigma: 0.02
+  min_approach_speed_for_tunnel: 0.20
+  approach_speed_sigma: 0.10
+  min_ball_x_velocity_for_entry: 0.05
+  through_legs_x_margin: 0.08
+  contact_speed_drop_threshold: 0.12
+  contact_foot_radius: 0.18
+  contact_ball_speed_threshold: 0.20
+  contact_quality_speed_sigma: 0.05
+  capture_speed_sigma: 0.15
+  swing_clearance_target: 0.06
+  swing_clearance_sigma: 0.0004
+  step_lateral_target: 0.10
+  max_keeper_stance_width: 0.24
+  stability_lin_sigma: 0.30
+  stability_ang_sigma: 1.20
+  swing_period: 0.20
+  upright_sigma: 0.10

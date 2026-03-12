@@ -8,4 +8,4 @@ from envs.T1.parameter_walk import ParameterWalk
 from envs.T1.high_level_training.kicking_high_level import KickingHighLevel
 from envs.T1.high_level_training.dribble_high_level import DribbleHighLevel
 from envs.K1.ball_control_k1 import BallControlK1
-
+from envs.K1.pass_receive_high_level import PassReceiveHighLevel
