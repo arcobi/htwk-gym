@@ -20,6 +20,9 @@ assert gymtorch
 
 class PassReceiveHighLevel(BallControlK1):
 
+    RECEIVE_MODE_REPOSITION = 0
+    RECEIVE_MODE_DIRECT_BLOCK = 1
+
     def __init__(self, cfg):
         super().__init__(cfg)
 
@@ -135,7 +138,7 @@ class PassReceiveHighLevel(BallControlK1):
                 self.default_dof_pos[:, i] = self.cfg["init_state"]["default_joint_angles"]["default"]
 
         hist_len = int(self.cfg["env"].get("detection_history_len", 6))
-        self.ball_detection_history_xy = torch.zeros(self.num_envs, hist_len, 2, dtype=torch.float, device=self.device)
+        self.ball_detection_history_world_xy = torch.zeros(self.num_envs, hist_len, 2, dtype=torch.float, device=self.device)
         self.ball_detection_history_age = torch.zeros(self.num_envs, hist_len, dtype=torch.float, device=self.device)
         self.ball_detection_history_valid = torch.zeros(self.num_envs, hist_len, dtype=torch.float, device=self.device)
         self.ball_detection_timer = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -149,23 +152,65 @@ class PassReceiveHighLevel(BallControlK1):
         self.ball_vel_local = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.ball_line_dir_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.ball_line_dir_local[:, 0] = -1.0
+        self.ball_line_dir_world = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.ball_line_dir_world[:, 0] = -1.0
+        self.intercept_point_world = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.intercept_point_raw_world = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.intercept_point_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.intercept_point_raw_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.intercept_time_estimate = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.intercept_time_raw = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.arrival_confidence = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.estimated_ball_speed = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.intercept_filter_initialized = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.prev_intercept_point_world = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.intercept_truth_point_world = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.intercept_truth_point_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.intercept_truth_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.intercept_estimate_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.intercept_target_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.intercept_jitter = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.receive_side = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.receive_side_onehot = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.receive_mode = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self.receive_mode_onehot = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.direct_block_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.direct_block_enter_event = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.direct_block_phase_lock_applied = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.intercept_phase = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.intercept_phase_onehot = torch.zeros(self.num_envs, 4, dtype=torch.float, device=self.device)
 
         self.feet_pos_local = torch.zeros(self.num_envs, len(self.feet_indices), 3, dtype=torch.float, device=self.device)
         self.chosen_foot_pos_local = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.chosen_receive_point_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.chosen_body_staging_point_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.chosen_foot_inner_normal = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.intercept_pose_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.receive_point_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.arrival_time_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.heading_alignment = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.side_foot_alignment = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_pose_forward_margin = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_pose_lateral_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_pose_heading_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.ball_forward_to_block = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.chosen_block_line = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.support_block_line = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_line_forward = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_pose_ready = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.block_pose_ready_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.support_foot_anchor = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.support_foot_anchor_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.lead_foot_ready = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ball_passed_unblocked = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ball_passed_unblocked_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.orbit_after_commit = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.orbit_after_commit_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.late_reposition = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.late_reposition_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.ball_front_hold_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.block_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.block_success_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self.stance_gap = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.stance_gap_target = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -185,9 +230,12 @@ class PassReceiveHighLevel(BallControlK1):
         self.ball_first_contact_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.time_since_first_contact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.ball_speed_drop = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.soft_contact_counter = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.last_ball_lin_vel_world = torch.zeros(self.num_envs, 3, dtype=torch.float, device=self.device)
         self.ball_has_passed_robot = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.clear_miss_time_buf = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.post_contact_speed_sample = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.post_contact_speed_sample_valid = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         self.capture_zone_score = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.capture_zone_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -195,6 +243,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.capture_success_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.controlled_receive_success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.controlled_receive_success_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self.capture_hold_time = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         self.pass_spawn_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.pass_target_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
@@ -202,6 +251,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.pass_ref_dir_xy[:, 0] = 1.0
         self.pass_ref_dir_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.pass_ref_dir_local[:, 0] = 1.0
+        self.pass_target_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.pass_distance = torch.ones(self.num_envs, dtype=torch.float, device=self.device)
         self.ball_progress_along_pass = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.ball_max_progress_along_pass = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -225,6 +275,9 @@ class PassReceiveHighLevel(BallControlK1):
         self.target_lin_vel_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.target_ang_vel_yaw = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.target_gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.raw_target_lin_vel_local = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
+        self.raw_target_ang_vel_yaw = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.raw_target_gait_frequency = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.locomotion_drive = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.step_required = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.step_required_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
@@ -234,6 +287,9 @@ class PassReceiveHighLevel(BallControlK1):
         self.no_step_failure_latched = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self.skate_distance_precontact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.skating_indicator = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.walk_away_indicator = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.walk_away_precontact_distance = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.prev_intercept_pose_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.prev_base_pos_xy = torch.zeros(self.num_envs, 2, dtype=torch.float, device=self.device)
         self.feet_speed_xy = torch.zeros(self.num_envs, len(self.feet_indices), dtype=torch.float, device=self.device)
 
@@ -272,6 +328,18 @@ class PassReceiveHighLevel(BallControlK1):
         self.metric_wrong_surface = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.metric_side_switch = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
         self.metric_pass_progress = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_intercept_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_intercept_jitter = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_intercept_target_error = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_walk_away = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_first_contact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_good_contact = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_post_contact_speed = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_lead_foot = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_support_anchor = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_block_success = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_ball_passed_unblocked = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
+        self.metric_orbit_after_commit = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
 
         curriculum_cfg = self.cfg.get("curriculum", {})
         self.curriculum_success_ring = torch.zeros(
@@ -282,6 +350,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.curriculum_prob = torch.zeros(int(curriculum_cfg.get("num_levels", 1)), dtype=torch.float, device=self.device)
         self.curriculum_prob[0] = 1.0
         self.curriculum_ring_idx = 0
+        self.curriculum_ring_count = 0
         self.curriculum_global_level = 0
         self.curriculum_level = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self.mean_lin_vel_level = 0.0
@@ -292,6 +361,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.debug_video_overlay = bool(self.cfg.get("viewer", {}).get("debug_video_overlay", True))
         self.debug_video_panel_size = int(self.cfg.get("viewer", {}).get("debug_video_panel_size", 220))
         self.debug_video_scale = float(self.cfg.get("viewer", {}).get("debug_video_scale", 120.0))
+        self.debug_show_intercept_truth = bool(self.cfg.get("viewer", {}).get("debug_show_intercept_truth", True))
         self.emit_reward_terms = bool(self.cfg.get("runner", {}).get("log_reward_terms", False))
         self.emit_metrics = bool(self.cfg.get("runner", {}).get("log_env_metrics", False))
 
@@ -327,6 +397,7 @@ class PassReceiveHighLevel(BallControlK1):
         short_speed_min = float(generator_cfg["short_speed_min"][level])
         short_speed_max = float(generator_cfg["short_speed_max"][level])
         foot_target_y = float(generator_cfg["foot_target_y"][level])
+        offcenter_target_y_min = float(generator_cfg.get("offcenter_target_y_min", [0.08])[level])
 
         target_local = torch.zeros(n, 2, device=self.device)
         travel_dir = torch.zeros(n, 2, device=self.device)
@@ -360,6 +431,17 @@ class PassReceiveHighLevel(BallControlK1):
         offcenter_mask = family_ids == 1
         if offcenter_mask.any():
             idx = offcenter_mask.nonzero(as_tuple=False).flatten()
+            side_sign = torch.where(
+                torch_rand_float(0.0, 1.0, (len(idx), 1), device=self.device).squeeze(-1) > 0.5,
+                torch.ones(len(idx), device=self.device),
+                -torch.ones(len(idx), device=self.device),
+            )
+            target_local[idx, 1] = side_sign * torch_rand_float(
+                offcenter_target_y_min,
+                target_y_max,
+                (len(idx), 1),
+                device=self.device,
+            ).squeeze(-1)
             delta = apply_randomization(
                 torch.zeros(len(idx), dtype=torch.float, device=self.device),
                 {
@@ -402,6 +484,7 @@ class PassReceiveHighLevel(BallControlK1):
         shallow_left_mask = family_ids == 3
         if shallow_left_mask.any():
             idx = shallow_left_mask.nonzero(as_tuple=False).flatten()
+            target_local[idx, 1] = torch_rand_float(offcenter_target_y_min, target_y_max, (len(idx), 1), device=self.device).squeeze(-1)
             delta = torch_rand_float(shallow_angle_min, shallow_angle_max, (len(idx), 1), device=self.device).squeeze(-1)
             travel_dir[idx, 0] = -torch.cos(delta)
             travel_dir[idx, 1] = -torch.sin(delta)
@@ -409,6 +492,7 @@ class PassReceiveHighLevel(BallControlK1):
         shallow_right_mask = family_ids == 4
         if shallow_right_mask.any():
             idx = shallow_right_mask.nonzero(as_tuple=False).flatten()
+            target_local[idx, 1] = -torch_rand_float(offcenter_target_y_min, target_y_max, (len(idx), 1), device=self.device).squeeze(-1)
             delta = torch_rand_float(-shallow_angle_max, -shallow_angle_min, (len(idx), 1), device=self.device).squeeze(-1)
             travel_dir[idx, 0] = -torch.cos(delta)
             travel_dir[idx, 1] = -torch.sin(delta)
@@ -503,13 +587,20 @@ class PassReceiveHighLevel(BallControlK1):
 
         self.curriculum_ring_idx = int((start + count) % ring_len)
 
-        success_rate = self.curriculum_success_ring.mean().item()
+        valid_count = max(1, min(self.curriculum_ring_count + count, ring_len))
+        self.curriculum_ring_count = valid_count
+        success_rate = self.curriculum_success_ring[:valid_count].mean().item()
         curriculum_cfg = self.cfg["curriculum"]
         max_level = int(curriculum_cfg["num_levels"]) - 1
+        previous_level = self.curriculum_global_level
         if success_rate > float(curriculum_cfg["advance_threshold"]) and self.curriculum_global_level < max_level:
             self.curriculum_global_level += 1
         elif success_rate < float(curriculum_cfg["retreat_threshold"]) and self.curriculum_global_level > 0:
             self.curriculum_global_level -= 1
+        if self.curriculum_global_level != previous_level:
+            self.curriculum_success_ring.zero_()
+            self.curriculum_ring_idx = 0
+            self.curriculum_ring_count = 0
         self.curriculum_level[:] = self.curriculum_global_level
         self.curriculum_prob.zero_()
         self.curriculum_prob[self.curriculum_global_level] = 1.0
@@ -527,6 +618,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.gym.refresh_actor_root_state_tensor(self.sim)
         self.gym.refresh_rigid_body_state_tensor(self.sim)
         self._refresh_feet_state()
+        self.last_feet_pos[:] = self.feet_pos
         self._insert_ball_detections(torch.arange(self.num_envs, device=self.device), reset_timer=True)
         self._update_receive_state()
         self._compute_observations()
@@ -549,32 +641,75 @@ class PassReceiveHighLevel(BallControlK1):
         self.last_actions[env_ids] = 0.0
         self.gait_frequency_offset[env_ids] = 0.0
         self.gait_frequency[env_ids] = float(self.cfg["commands"]["gait_frequency_base"])
-        self.gait_process[env_ids] = torch_rand_float(0.0, 1.0, (len(env_ids), 1), device=self.device).squeeze(-1)
+        self.gait_process[env_ids] = 0.0
         self.delay_steps[env_ids] = torch.randint(0, self.cfg["control"]["decimation"], (len(env_ids),), device=self.device)
 
-        self.ball_detection_history_xy[env_ids] = 0.0
+        self.ball_detection_history_world_xy[env_ids] = 0.0
         self.ball_detection_history_age[env_ids] = 0.0
         self.ball_detection_history_valid[env_ids] = 0.0
         self.ball_detection_timer[env_ids] = torch_rand_float(0.0, self.ball_detection_interval, (len(env_ids), 1), device=self.device).squeeze(-1)
         self.ball_detection_age[env_ids] = self.cfg["ball"].get("detection_age_clip_s", 0.25)
 
+        self.ball_line_dir_world[env_ids, 0] = -1.0
+        self.ball_line_dir_world[env_ids, 1] = 0.0
         self.ball_line_dir_local[env_ids, 0] = -1.0
         self.ball_line_dir_local[env_ids, 1] = 0.0
+        self.intercept_point_world[env_ids] = 0.0
+        self.intercept_point_raw_world[env_ids] = 0.0
         self.intercept_point_local[env_ids] = 0.0
+        self.intercept_point_raw_local[env_ids] = 0.0
         self.intercept_time_estimate[env_ids] = 0.0
+        self.intercept_time_raw[env_ids] = 0.0
         self.arrival_confidence[env_ids] = 0.0
         self.estimated_ball_speed[env_ids] = 0.0
+        self.intercept_filter_initialized[env_ids] = False
+        self.prev_intercept_point_world[env_ids] = 0.0
+        self.intercept_truth_point_world[env_ids] = 0.0
+        self.intercept_truth_point_local[env_ids] = 0.0
+        self.intercept_truth_time[env_ids] = 0.0
+        self.intercept_estimate_error[env_ids] = 0.0
+        self.intercept_target_error[env_ids] = 0.0
+        self.intercept_jitter[env_ids] = 0.0
         self.receive_side[env_ids] = 0
         self.receive_side_onehot[env_ids] = 0.0
+        self.receive_mode[env_ids] = self.RECEIVE_MODE_REPOSITION
+        self.receive_mode_onehot[env_ids] = 0.0
+        self.receive_mode_onehot[env_ids, self.RECEIVE_MODE_REPOSITION] = 1.0
+        self.direct_block_latched[env_ids] = False
+        self.direct_block_enter_event[env_ids] = False
+        self.direct_block_phase_lock_applied[env_ids] = False
         self.intercept_phase[env_ids] = 0
         self.intercept_phase_onehot[env_ids] = 0.0
         self.chosen_foot_pos_local[env_ids] = 0.0
         self.chosen_receive_point_local[env_ids] = 0.0
+        self.chosen_body_staging_point_local[env_ids] = 0.0
         self.chosen_foot_inner_normal[env_ids] = 0.0
         self.intercept_pose_error[env_ids] = 0.0
+        self.receive_point_error[env_ids] = 0.0
         self.arrival_time_error[env_ids] = 0.0
         self.heading_alignment[env_ids] = 0.0
         self.side_foot_alignment[env_ids] = 0.0
+        self.block_pose_forward_margin[env_ids] = 0.0
+        self.block_pose_lateral_error[env_ids] = 0.0
+        self.block_pose_heading_error[env_ids] = 0.0
+        self.ball_forward_to_block[env_ids] = 0.0
+        self.chosen_block_line[env_ids] = 0.0
+        self.support_block_line[env_ids] = 0.0
+        self.block_line_forward[env_ids] = 0.0
+        self.block_pose_ready[env_ids] = False
+        self.block_pose_ready_latched[env_ids] = False
+        self.support_foot_anchor[env_ids] = False
+        self.support_foot_anchor_latched[env_ids] = False
+        self.lead_foot_ready[env_ids] = False
+        self.ball_passed_unblocked[env_ids] = False
+        self.ball_passed_unblocked_latched[env_ids] = False
+        self.orbit_after_commit[env_ids] = False
+        self.orbit_after_commit_latched[env_ids] = False
+        self.late_reposition[env_ids] = False
+        self.late_reposition_latched[env_ids] = False
+        self.ball_front_hold_time[env_ids] = 0.0
+        self.block_success[env_ids] = False
+        self.block_success_latched[env_ids] = False
         self.stance_gap[env_ids] = 0.0
         self.stance_gap_target[env_ids] = 0.0
         self.tunnel_risk[env_ids] = 0.0
@@ -592,21 +727,26 @@ class PassReceiveHighLevel(BallControlK1):
         self.ball_first_contact_time[env_ids] = 0.0
         self.time_since_first_contact[env_ids] = 0.0
         self.ball_speed_drop[env_ids] = 0.0
+        self.soft_contact_counter[env_ids] = 0
         self.last_ball_lin_vel_world[env_ids] = 0.0
         self.ball_has_passed_robot[env_ids] = False
         self.clear_miss_time_buf[env_ids] = 0.0
+        self.post_contact_speed_sample[env_ids] = 0.0
+        self.post_contact_speed_sample_valid[env_ids] = False
         self.capture_zone_score[env_ids] = 0.0
         self.capture_zone_error[env_ids] = 0.0
         self.capture_success[env_ids] = False
         self.capture_success_latched[env_ids] = False
         self.controlled_receive_success[env_ids] = False
         self.controlled_receive_success_latched[env_ids] = False
+        self.capture_hold_time[env_ids] = 0.0
         self.pass_spawn_xy[env_ids] = 0.0
         self.pass_target_xy[env_ids] = 0.0
         self.pass_ref_dir_xy[env_ids] = 0.0
         self.pass_ref_dir_xy[env_ids, 0] = 1.0
         self.pass_ref_dir_local[env_ids] = 0.0
         self.pass_ref_dir_local[env_ids, 0] = 1.0
+        self.pass_target_local[env_ids] = 0.0
         self.pass_distance[env_ids] = 1.0
         self.ball_progress_along_pass[env_ids] = 0.0
         self.ball_max_progress_along_pass[env_ids] = 0.0
@@ -629,6 +769,9 @@ class PassReceiveHighLevel(BallControlK1):
         self.target_lin_vel_local[env_ids] = 0.0
         self.target_ang_vel_yaw[env_ids] = 0.0
         self.target_gait_frequency[env_ids] = float(self.cfg["locomotion_targets"]["idle_gait_frequency"])
+        self.raw_target_lin_vel_local[env_ids] = 0.0
+        self.raw_target_ang_vel_yaw[env_ids] = 0.0
+        self.raw_target_gait_frequency[env_ids] = float(self.cfg["locomotion_targets"]["idle_gait_frequency"])
         self.locomotion_drive[env_ids] = 0.0
         self.step_required[env_ids] = False
         self.step_required_latched[env_ids] = False
@@ -638,6 +781,9 @@ class PassReceiveHighLevel(BallControlK1):
         self.no_step_failure_latched[env_ids] = False
         self.skate_distance_precontact[env_ids] = 0.0
         self.skating_indicator[env_ids] = 0.0
+        self.walk_away_indicator[env_ids] = 0.0
+        self.walk_away_precontact_distance[env_ids] = 0.0
+        self.prev_intercept_pose_error[env_ids] = 0.0
         self.prev_base_pos_xy[env_ids] = self.root_states[env_ids, 0, 0:2]
         self.feet_speed_xy[env_ids] = 0.0
         self.receive_side_locked[env_ids] = False
@@ -667,11 +813,14 @@ class PassReceiveHighLevel(BallControlK1):
         ball_rel_world = self.ball_pos[detect_ids] - self.base_pos[detect_ids]
         ball_rel_local = quat_rotate_inverse(self.base_quat[detect_ids], ball_rel_world)
         noisy_xy = apply_randomization(ball_rel_local[:, 0:2], self.cfg["noise"].get("ball_pos"))
+        noisy_local = torch.zeros(len(detect_ids), 3, dtype=torch.float, device=self.device)
+        noisy_local[:, 0:2] = noisy_xy
+        noisy_world = self.base_pos[detect_ids] + quat_rotate(self.base_quat[detect_ids], noisy_local)
 
-        self.ball_detection_history_xy[detect_ids, 1:] = self.ball_detection_history_xy[detect_ids, :-1].clone()
+        self.ball_detection_history_world_xy[detect_ids, 1:] = self.ball_detection_history_world_xy[detect_ids, :-1].clone()
         self.ball_detection_history_age[detect_ids, 1:] = self.ball_detection_history_age[detect_ids, :-1].clone()
         self.ball_detection_history_valid[detect_ids, 1:] = self.ball_detection_history_valid[detect_ids, :-1].clone()
-        self.ball_detection_history_xy[detect_ids, 0] = noisy_xy
+        self.ball_detection_history_world_xy[detect_ids, 0] = noisy_world[:, 0:2]
         self.ball_detection_history_age[detect_ids, 0] = 0.0
         self.ball_detection_history_valid[detect_ids, 0] = 1.0
         self.ball_detection_age[detect_ids] = 0.0
@@ -714,6 +863,67 @@ class PassReceiveHighLevel(BallControlK1):
 
         self._insert_ball_detections(detect_ids, reset_timer=True)
 
+    def _points_world_to_local_xy(self, points_world_xy):
+        points_world = torch.zeros(*points_world_xy.shape[:-1], 3, dtype=torch.float, device=self.device)
+        points_world[:, :, 0:2] = points_world_xy
+        rel_world = points_world - self.base_pos.unsqueeze(1)
+        rel_local = quat_rotate_inverse(
+            self.base_quat.unsqueeze(1).expand(-1, points_world_xy.shape[1], -1).reshape(-1, 4),
+            rel_world.reshape(-1, 3),
+        ).view(points_world_xy.shape[0], points_world_xy.shape[1], 3)
+        return rel_local[:, :, 0:2]
+
+    def _world_xy_to_local_xy(self, world_xy):
+        world = torch.zeros(world_xy.shape[0], 3, dtype=torch.float, device=self.device)
+        world[:, 0:2] = world_xy
+        local = quat_rotate_inverse(self.base_quat, world - self.base_pos)
+        return local[:, 0:2]
+
+    def _world_dir_to_local_xy(self, dir_world_xy):
+        dir_world = torch.zeros(dir_world_xy.shape[0], 3, dtype=torch.float, device=self.device)
+        dir_world[:, 0:2] = dir_world_xy
+        dir_local = quat_rotate_inverse(self.base_quat, dir_world)
+        return dir_local[:, 0:2]
+
+    def _clamp_world_shift(self, source_xy, target_xy, max_step):
+        delta = target_xy - source_xy
+        delta_norm = torch.norm(delta, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        scale = torch.clamp(max_step / delta_norm, max=1.0)
+        return source_xy + delta * scale
+
+    def _estimate_line_intercept_world(self, point_xy, vel_xy, anchor_xy, fallback_xy):
+        estimator_cfg = self.cfg["estimator"]
+        speed = torch.norm(vel_xy, dim=-1)
+        dir_xy = vel_xy / speed.unsqueeze(-1).clamp_min(1.0e-6)
+
+        time_clip = float(estimator_cfg["time_clip_s"])
+        min_anchor_speed = float(estimator_cfg.get("min_anchor_speed", estimator_cfg.get("min_plane_speed", 0.05)))
+        valid_anchor = speed > min_anchor_speed
+
+        anchor_delta = anchor_xy - point_xy
+        anchor_t = torch.sum(anchor_delta * dir_xy, dim=-1) / speed.clamp_min(1.0e-6)
+        anchor_t = torch.clamp(anchor_t, min=0.0, max=time_clip)
+        anchor_point = point_xy + vel_xy * anchor_t.unsqueeze(-1)
+
+        fallback_delta = fallback_xy - point_xy
+        fallback_t = torch.sum(fallback_delta * dir_xy, dim=-1) / speed.clamp_min(1.0e-6)
+        fallback_t = torch.clamp(fallback_t, min=0.0, max=time_clip)
+        fallback_point = point_xy + vel_xy * fallback_t.unsqueeze(-1)
+        fallback_point = torch.where(valid_anchor.unsqueeze(-1), fallback_point, fallback_xy)
+        fallback_t = torch.where(valid_anchor, fallback_t, torch.zeros_like(fallback_t))
+        return anchor_point, anchor_t, fallback_point, fallback_t, dir_xy, speed
+
+    def _update_truth_intercept(self):
+        truth_point, truth_time, _, _, _, _ = self._estimate_line_intercept_world(
+            self.ball_pos[:, 0:2],
+            self.ball_lin_vel[:, 0:2],
+            self.pass_target_xy,
+            self.ball_pos[:, 0:2],
+        )
+        self.intercept_truth_point_world[:] = truth_point
+        self.intercept_truth_point_local[:] = self._world_xy_to_local_xy(truth_point)
+        self.intercept_truth_time[:] = truth_time
+
     def _estimate_intercept_from_history(self):
         times = -self.ball_detection_history_age
         valid = self.ball_detection_history_valid
@@ -721,17 +931,21 @@ class PassReceiveHighLevel(BallControlK1):
         weight_sum = weights.sum(dim=1).clamp_min(1.0e-6)
 
         mean_t = (weights * times).sum(dim=1, keepdim=True) / weight_sum.unsqueeze(-1)
-        mean_xy = (weights.unsqueeze(-1) * self.ball_detection_history_xy).sum(dim=1) / weight_sum.unsqueeze(-1)
+        mean_xy = (weights.unsqueeze(-1) * self.ball_detection_history_world_xy).sum(dim=1) / weight_sum.unsqueeze(-1)
 
         centered_t = times - mean_t
         var_t = (weights * centered_t.square()).sum(dim=1).clamp_min(1.0e-6)
-        slope_xy = (weights.unsqueeze(-1) * centered_t.unsqueeze(-1) * (self.ball_detection_history_xy - mean_xy.unsqueeze(1))).sum(dim=1) / var_t.unsqueeze(-1)
+        slope_xy = (
+            weights.unsqueeze(-1)
+            * centered_t.unsqueeze(-1)
+            * (self.ball_detection_history_world_xy - mean_xy.unsqueeze(1))
+        ).sum(dim=1) / var_t.unsqueeze(-1)
         intercept_xy = mean_xy - slope_xy * mean_t
 
         speed = torch.norm(slope_xy, dim=-1)
         dir_xy = slope_xy / speed.unsqueeze(-1).clamp_min(1.0e-6)
 
-        residual = self.ball_detection_history_xy - (intercept_xy.unsqueeze(1) + slope_xy.unsqueeze(1) * times.unsqueeze(-1))
+        residual = self.ball_detection_history_world_xy - (intercept_xy.unsqueeze(1) + slope_xy.unsqueeze(1) * times.unsqueeze(-1))
         residual_norm = torch.norm(residual, dim=-1)
         residual_mse = (weights * residual_norm.square()).sum(dim=1) / weight_sum
 
@@ -743,31 +957,67 @@ class PassReceiveHighLevel(BallControlK1):
         confidence = count_score * age_score * fit_score * speed_score
 
         latest_valid = valid[:, 0] > 0.5
-        fallback_xy = torch.where(latest_valid.unsqueeze(-1), self.ball_detection_history_xy[:, 0], mean_xy)
-        fallback_dir = -fallback_xy / torch.norm(fallback_xy, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        fallback_xy = torch.where(latest_valid.unsqueeze(-1), self.ball_detection_history_world_xy[:, 0], mean_xy)
+        current_vel_xy = self.ball_lin_vel[:, 0:2]
+        current_speed = torch.norm(current_vel_xy, dim=-1)
+        current_dir = current_vel_xy / current_speed.unsqueeze(-1).clamp_min(1.0e-6)
+        fallback_dir = torch.where(
+            (current_speed > float(self.cfg["estimator"]["min_speed_for_fit"])).unsqueeze(-1),
+            current_dir,
+            torch.stack((torch.full_like(fallback_xy[:, 0], -1.0), torch.zeros_like(fallback_xy[:, 0])), dim=-1),
+        )
 
         use_fit = (valid_count >= 2.0) & (speed > float(self.cfg["estimator"]["min_speed_for_fit"]))
         dir_xy = torch.where(use_fit.unsqueeze(-1), dir_xy, fallback_dir)
-        intercept_xy = torch.where(use_fit.unsqueeze(-1), intercept_xy, fallback_xy)
-        speed = torch.where(use_fit, speed, torch.zeros_like(speed))
+        fit_vel_xy = torch.where(use_fit.unsqueeze(-1), slope_xy, current_vel_xy)
+        fit_speed = torch.where(use_fit, speed, current_speed)
+        current_point_xy = torch.where(use_fit.unsqueeze(-1), intercept_xy, fallback_xy)
+        anchor_point_world, anchor_time, fallback_point_world, fallback_time, raw_dir_world, fit_speed = self._estimate_line_intercept_world(
+            current_point_xy,
+            fit_vel_xy,
+            self.pass_target_xy,
+            self.ball_pos[:, 0:2],
+        )
 
-        receive_plane_x = float(self.cfg["estimator"]["receive_plane_x"])
-        denom = slope_xy[:, 0]
-        valid_plane = use_fit & (torch.abs(denom) > float(self.cfg["estimator"]["min_plane_speed"])) & (intercept_xy[:, 0] > receive_plane_x)
-        t_plane = (receive_plane_x - intercept_xy[:, 0]) / denom.clamp(min=-1.0e6, max=1.0e6)
-        t_plane = torch.clamp(t_plane, min=0.0, max=float(self.cfg["estimator"]["time_clip_s"]))
-        predicted_point = intercept_xy + slope_xy * t_plane.unsqueeze(-1)
+        estimator_cfg = self.cfg["estimator"]
+        high_conf = confidence >= float(estimator_cfg.get("stable_confidence_threshold", 0.55))
+        hold_conf = confidence < float(estimator_cfg.get("hold_confidence_threshold", 0.25))
+        anchor_conf = confidence >= float(estimator_cfg.get("anchor_confidence_threshold", estimator_cfg.get("low_confidence_threshold", 0.35)))
+        raw_point_world = torch.where(anchor_conf.unsqueeze(-1), anchor_point_world, fallback_point_world)
+        raw_time = torch.where(anchor_conf, anchor_time, fallback_time)
+        alpha_high = float(estimator_cfg.get("smoothing_alpha_high", 0.55))
+        alpha_low = float(estimator_cfg.get("smoothing_alpha_low", 0.18))
+        alpha = torch.where(high_conf, torch.full_like(confidence, alpha_high), torch.full_like(confidence, alpha_low))
+        has_prev = self.intercept_filter_initialized
 
-        nearest_t = -torch.sum(intercept_xy * dir_xy, dim=-1) / speed.clamp_min(1.0e-6)
-        nearest_t = torch.clamp(nearest_t, min=0.0, max=float(self.cfg["estimator"]["time_clip_s"]))
-        nearest_point = intercept_xy + slope_xy * nearest_t.unsqueeze(-1)
+        smoothed_point_world = alpha.unsqueeze(-1) * raw_point_world + (1.0 - alpha.unsqueeze(-1)) * self.intercept_point_world
+        smoothed_time = alpha * raw_time + (1.0 - alpha) * self.intercept_time_estimate
+        smoothed_point_world = torch.where(has_prev.unsqueeze(-1), smoothed_point_world, raw_point_world)
+        smoothed_time = torch.where(has_prev, smoothed_time, raw_time)
+        smoothed_point_world = torch.where(hold_conf.unsqueeze(-1) & has_prev.unsqueeze(-1), self.intercept_point_world, smoothed_point_world)
+        smoothed_time = torch.where(hold_conf & has_prev, self.intercept_time_estimate, smoothed_time)
 
-        use_plane_solution = valid_plane & (t_plane <= float(self.cfg["estimator"]["time_clip_s"]))
-        self.intercept_point_local[:] = torch.where(use_plane_solution.unsqueeze(-1), predicted_point, nearest_point)
-        self.intercept_time_estimate[:] = torch.where(use_plane_solution, t_plane, nearest_t)
-        self.ball_line_dir_local[:] = dir_xy
+        prev_point_world = torch.where(has_prev.unsqueeze(-1), self.intercept_point_world, smoothed_point_world)
+        max_shift = float(estimator_cfg.get("max_stable_target_shift_per_step", 0.06))
+        if max_shift > 0.0:
+            limited_point_world = self._clamp_world_shift(prev_point_world, smoothed_point_world, max_shift)
+            smoothed_point_world = torch.where(has_prev.unsqueeze(-1), limited_point_world, smoothed_point_world)
+        self.prev_intercept_point_world[:] = prev_point_world
+        self.intercept_point_world[:] = smoothed_point_world
+        self.intercept_point_raw_world[:] = raw_point_world
+        self.intercept_time_raw[:] = raw_time
+        self.intercept_time_estimate[:] = smoothed_time
+        self.intercept_point_raw_local[:] = self._world_xy_to_local_xy(raw_point_world)
+        self.intercept_point_local[:] = self._world_xy_to_local_xy(smoothed_point_world)
+        self.ball_line_dir_world[:] = raw_dir_world
+        self.ball_line_dir_local[:] = self._world_dir_to_local_xy(raw_dir_world)
         self.arrival_confidence[:] = confidence
-        self.estimated_ball_speed[:] = speed
+        self.estimated_ball_speed[:] = fit_speed
+        self.intercept_filter_initialized |= latest_valid | use_fit
+        self.intercept_jitter[:] = torch.norm(self.intercept_point_world - prev_point_world, dim=-1)
+        self._update_truth_intercept()
+        self.intercept_estimate_error[:] = torch.norm(self.intercept_point_world - self.intercept_truth_point_world, dim=-1)
+        self.intercept_target_error[:] = torch.norm(self.intercept_point_world - self.pass_target_xy, dim=-1)
 
     def _compute_local_foot_geometry(self):
         feet_rel_world = self.feet_pos - self.base_pos.unsqueeze(1)
@@ -780,11 +1030,38 @@ class PassReceiveHighLevel(BallControlK1):
         foot_y_axis = torch.stack((-torch.sin(self.feet_yaw_rel), torch.cos(self.feet_yaw_rel)), dim=-1)
         left_inner_normal = -foot_y_axis[:, 0]
         right_inner_normal = foot_y_axis[:, 1]
+        foot_forward = torch.stack((torch.cos(self.feet_yaw_rel), torch.sin(self.feet_yaw_rel)), dim=-1)
 
-        use_left = self.intercept_point_local[:, 1] >= 0.0
+        forward_offset = float(self.cfg["receive_geometry"]["foot_forward_contact_offset"])
+        side_offset = float(self.cfg["receive_geometry"]["foot_inner_contact_offset"])
+        stage_backoff = float(self.cfg["receive_geometry"].get("body_staging_backoff", 0.16))
+        stage_center_pull = float(self.cfg["receive_geometry"].get("body_staging_center_pull", 0.05))
+        stage_lateral_scale = float(self.cfg["receive_geometry"].get("body_staging_lateral_scale", 0.55))
+        stage_lateral_max = float(self.cfg["receive_geometry"].get("body_staging_lateral_max", 0.10))
+        stage_forward_weight = float(self.cfg["receive_geometry"].get("body_staging_forward_weight", 0.35))
+        stage_lateral_weight = float(self.cfg["receive_geometry"].get("body_staging_lateral_weight", 1.0))
+
+        left_receive = feet_local[:, 0, 0:2] + foot_forward[:, 0] * forward_offset + left_inner_normal * side_offset
+        right_receive = feet_local[:, 1, 0:2] + foot_forward[:, 1] * forward_offset + right_inner_normal * side_offset
+
+        incoming_dir = -self.ball_line_dir_local
+        incoming_dir = incoming_dir / torch.norm(incoming_dir, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        left_stage = left_receive - incoming_dir * stage_backoff + left_inner_normal * stage_center_pull
+        right_stage = right_receive - incoming_dir * stage_backoff + right_inner_normal * stage_center_pull
+        left_stage[:, 1] = torch.clamp(left_stage[:, 1] * stage_lateral_scale, min=-stage_lateral_max, max=stage_lateral_max)
+        right_stage[:, 1] = torch.clamp(right_stage[:, 1] * stage_lateral_scale, min=-stage_lateral_max, max=stage_lateral_max)
+
         low_conf = self.arrival_confidence < float(self.cfg["estimator"]["low_confidence_threshold"])
-        use_left = torch.where(low_conf, self.ball_pos_local[:, 1] >= 0.0, use_left)
-        proposed_side = torch.where(use_left, torch.zeros_like(self.receive_side), torch.ones_like(self.receive_side))
+        selection_target = torch.where(
+            low_conf.unsqueeze(-1),
+            self.ball_pos_local[:, 0:2],
+            self.intercept_point_local,
+        )
+        left_delta = selection_target - left_stage
+        right_delta = selection_target - right_stage
+        left_score = torch.abs(left_delta[:, 1]) * stage_lateral_weight + torch.abs(left_delta[:, 0]) * stage_forward_weight
+        right_score = torch.abs(right_delta[:, 1]) * stage_lateral_weight + torch.abs(right_delta[:, 0]) * stage_forward_weight
+        proposed_side = torch.where(left_score <= right_score, torch.zeros_like(self.receive_side), torch.ones_like(self.receive_side))
         pre_contact = ~self.ball_has_been_contacted
         lock_threshold = float(self.cfg["contact_classifier"]["side_lock_conf_threshold"])
         new_lock = (self.arrival_confidence >= lock_threshold) & pre_contact & (~self.receive_side_locked)
@@ -806,26 +1083,18 @@ class PassReceiveHighLevel(BallControlK1):
         chosen_is_left = (self.receive_side == 0).unsqueeze(-1)
         self.chosen_foot_inner_normal[:] = torch.where(chosen_is_left, left_inner_normal, right_inner_normal)
 
-        foot_forward = torch.stack((torch.cos(self.feet_yaw_rel), torch.sin(self.feet_yaw_rel)), dim=-1)
         chosen_forward = foot_forward[self.env_ids_arange, chosen_idx]
         other_forward = foot_forward[self.env_ids_arange, other_idx]
         self.chosen_foot_forward[:] = chosen_forward
         self.other_foot_forward[:] = other_forward
         self.other_foot_inner_normal[:] = torch.where(chosen_is_left, right_inner_normal, left_inner_normal)
-        forward_offset = float(self.cfg["receive_geometry"]["foot_forward_contact_offset"])
-        side_offset = float(self.cfg["receive_geometry"]["foot_inner_contact_offset"])
-        self.chosen_receive_point_local[:] = (
-            self.chosen_foot_pos_local[:, 0:2]
-            + chosen_forward * forward_offset
-            + self.chosen_foot_inner_normal * side_offset
-        )
-
-        incoming_dir = -self.ball_line_dir_local
-        incoming_dir = incoming_dir / torch.norm(incoming_dir, dim=-1, keepdim=True).clamp_min(1.0e-6)
+        self.chosen_receive_point_local[:] = torch.where(chosen_is_left, left_receive, right_receive)
+        self.chosen_body_staging_point_local[:] = torch.where(chosen_is_left, left_stage, right_stage)
         self.side_foot_alignment[:] = torch.clamp(torch.sum(self.chosen_foot_inner_normal * incoming_dir, dim=-1), min=0.0, max=1.0)
 
         self.heading_alignment[:] = torch.clamp(torch.sum(self.forward_body_vec * incoming_dir, dim=-1), min=0.0, max=1.0)
-        self.intercept_pose_error[:] = torch.norm(self.chosen_receive_point_local - self.intercept_point_local, dim=-1)
+        self.intercept_pose_error[:] = torch.norm(self.chosen_body_staging_point_local - self.intercept_point_local, dim=-1)
+        self.receive_point_error[:] = torch.norm(self.chosen_receive_point_local - self.intercept_point_local, dim=-1)
 
         plan_speed = torch.maximum(
             torch.norm(self.filtered_lin_vel[:, 0:2], dim=-1),
@@ -858,10 +1127,11 @@ class PassReceiveHighLevel(BallControlK1):
         sin_yaw = torch.sin(base_yaw)
         self.pass_ref_dir_local[:, 0] = cos_yaw * pass_dir[:, 0] + sin_yaw * pass_dir[:, 1]
         self.pass_ref_dir_local[:, 1] = -sin_yaw * pass_dir[:, 0] + cos_yaw * pass_dir[:, 1]
+        self.pass_target_local[:] = self._world_xy_to_local_xy(self.pass_target_xy)
 
         side_sign = torch.where(self.receive_side == 0, 1.0, -1.0)
         heading_bias = float(self.cfg["turn_guard"]["receive_heading_side_bias"])
-        desired_forward_world = pass_dir + side_sign.unsqueeze(-1) * heading_bias * pass_perp
+        desired_forward_world = -pass_dir + side_sign.unsqueeze(-1) * heading_bias * pass_perp
         desired_forward_world = desired_forward_world / torch.norm(desired_forward_world, dim=-1, keepdim=True).clamp_min(1.0e-6)
         self.desired_receive_heading[:] = torch.atan2(desired_forward_world[:, 1], desired_forward_world[:, 0])
         self.desired_heading_error[:] = (self.desired_receive_heading - base_yaw + torch.pi) % (2 * torch.pi) - torch.pi
@@ -904,29 +1174,179 @@ class PassReceiveHighLevel(BallControlK1):
             self.ball_max_progress_along_pass,
         )
 
+    def _update_feet_speed_state(self):
+        feet_delta = self.feet_pos[:, :, 0:2] - self.last_feet_pos[:, :, 0:2]
+        self.feet_speed_xy[:] = torch.norm(feet_delta / max(self.dt, 1.0e-6), dim=-1)
+
+    def _update_block_state(self):
+        desired_forward_local = self.desired_heading_vec_local / torch.norm(
+            self.desired_heading_vec_local, dim=-1, keepdim=True
+        ).clamp_min(1.0e-6)
+        desired_lateral_local = torch.stack((-desired_forward_local[:, 1], desired_forward_local[:, 0]), dim=-1)
+        lead_margin = torch.sum((self.chosen_foot_pos_local[:, 0:2] - self.other_foot_pos_local[:, 0:2]) * desired_forward_local, dim=-1)
+        receive_to_intercept = self.intercept_point_local - self.chosen_receive_point_local
+        lateral_error = torch.abs(torch.sum(receive_to_intercept * desired_lateral_local, dim=-1))
+        heading_error = torch.abs(self.desired_heading_error)
+
+        support_idx = 1 - self.receive_side
+        support_speed = self.feet_speed_xy[self.env_ids_arange, support_idx]
+        support_anchor_thresh = float(self.cfg["contact_classifier"]["support_foot_speed_max"])
+        support_anchor = support_speed < support_anchor_thresh
+
+        lead_margin_target = float(self.cfg["receive_geometry"].get("block_pose_forward_margin", 0.03))
+        lateral_tolerance = float(self.cfg["receive_geometry"].get("block_pose_lateral_tolerance", 0.04))
+        heading_tolerance = float(self.cfg.get("receive_modes", {}).get("block_pose_heading_tolerance", 0.25))
+        pre_contact = ~self.ball_has_been_contacted
+
+        self.block_pose_forward_margin[:] = lead_margin
+        self.block_pose_lateral_error[:] = lateral_error
+        self.block_pose_heading_error[:] = heading_error
+        self.lead_foot_ready[:] = lead_margin >= lead_margin_target
+        self.support_foot_anchor[:] = pre_contact & support_anchor
+        self.block_pose_ready[:] = (
+            pre_contact
+            & self.lead_foot_ready
+            & (lateral_error <= lateral_tolerance)
+            & support_anchor
+            & (heading_error <= heading_tolerance)
+        )
+        self.block_pose_ready_latched |= self.block_pose_ready
+        self.support_foot_anchor_latched |= self.support_foot_anchor
+
+        # Use the robot's actual front/back axis here. Desired/pass directions can
+        # briefly flip during the pre-turn phase and falsely mark the ball as "passed"
+        # even while it is still clearly in front of the body.
+        ball_forward = self.ball_pos_local[:, 0]
+        chosen_block_line = self.chosen_foot_pos_local[:, 0]
+        support_block_line = self.other_foot_pos_local[:, 0]
+        block_line = torch.minimum(chosen_block_line, support_block_line)
+        back_margin = float(self.cfg.get("receive_modes", {}).get("ball_passed_back_margin", 0.02))
+        self.ball_forward_to_block[:] = ball_forward
+        self.chosen_block_line[:] = chosen_block_line
+        self.support_block_line[:] = support_block_line
+        self.block_line_forward[:] = block_line
+        self.ball_passed_unblocked[:] = pre_contact & (ball_forward < (block_line - back_margin))
+
+        orbit_heading_thresh = float(
+            self.cfg.get("receive_modes", {}).get(
+                "orbit_after_commit_heading_threshold",
+                self.cfg["turn_guard"]["orbit_heading_threshold"],
+            )
+        )
+        orbit_distance = float(self.cfg["turn_guard"]["orbit_ball_distance"])
+        ball_dist_local = torch.norm(self.ball_pos_local[:, 0:2], dim=-1)
+        self.orbit_after_commit[:] = (
+            pre_contact
+            & self.direct_block_latched
+            & (heading_error > orbit_heading_thresh)
+            & (ball_dist_local < orbit_distance)
+        )
+        self.orbit_after_commit_latched |= self.orbit_after_commit
+
+    def _update_receive_mode(self):
+        cfg = self.cfg.get("receive_modes", {})
+        time_threshold = float(cfg.get("direct_block_time_threshold", 0.45))
+        pose_threshold = float(cfg.get("direct_block_pose_error_threshold", 0.06))
+        pre_contact = ~self.ball_has_been_contacted
+        desired_direct = pre_contact & (
+            self.direct_block_latched
+            | self.block_pose_ready
+            | (self.intercept_time_estimate <= time_threshold)
+            | (self.receive_point_error <= pose_threshold)
+        )
+        self.direct_block_enter_event[:] = desired_direct & (~self.direct_block_latched)
+        self.direct_block_latched |= desired_direct
+        self.receive_mode[:] = torch.where(
+            self.direct_block_latched,
+            torch.full_like(self.receive_mode, self.RECEIVE_MODE_DIRECT_BLOCK),
+            torch.full_like(self.receive_mode, self.RECEIVE_MODE_REPOSITION),
+        )
+        self.receive_mode_onehot.zero_()
+        self.receive_mode_onehot.scatter_(1, self.receive_mode.unsqueeze(-1), 1.0)
+
+        enter_ids = self.direct_block_enter_event.nonzero(as_tuple=False).flatten()
+        if len(enter_ids) > 0:
+            self.receive_side_locked[enter_ids] = True
+            self.receive_side_lock_value[enter_ids] = self.receive_side[enter_ids]
+            if bool(cfg.get("phase_lock_on_side_select", True)):
+                left_phase = float(cfg.get("direct_block_phase_left", 0.15))
+                right_phase = float(cfg.get("direct_block_phase_right", 0.65))
+                left_mask = self.receive_side[enter_ids] == 0
+                if left_mask.any():
+                    self.gait_process[enter_ids[left_mask]] = left_phase
+                if (~left_mask).any():
+                    self.gait_process[enter_ids[~left_mask]] = right_phase
+                self.direct_block_phase_lock_applied[enter_ids] = True
+
+        intercept_window = float(self.cfg["rewards"]["intercept_window_s"])
+        self.late_reposition[:] = pre_contact & (self.receive_mode == self.RECEIVE_MODE_REPOSITION) & (
+            self.intercept_time_estimate <= intercept_window
+        )
+        self.late_reposition_latched |= self.late_reposition
+
     def _update_locomotion_targets(self):
         cfg = self.cfg["locomotion_targets"]
-        reposition_delta = self.intercept_point_local - self.chosen_receive_point_local
+        mode_cfg = self.cfg.get("receive_modes", {})
+        direct_mode = self.receive_mode == self.RECEIVE_MODE_DIRECT_BLOCK
+        target_point_local = torch.where(
+            direct_mode.unsqueeze(-1),
+            self.chosen_receive_point_local,
+            self.chosen_body_staging_point_local,
+        )
+        reposition_delta = self.intercept_point_local - target_point_local
+        desired_forward_local = self.desired_heading_vec_local / torch.norm(
+            self.desired_heading_vec_local, dim=-1, keepdim=True
+        ).clamp_min(1.0e-6)
+        desired_lateral_local = torch.stack((-desired_forward_local[:, 1], desired_forward_local[:, 0]), dim=-1)
         forward_clip = float(cfg.get("forward_clip", cfg["step_required_distance"]))
-        forward_error = torch.clamp(reposition_delta[:, 0], min=-forward_clip, max=forward_clip)
-        lateral_error = reposition_delta[:, 1]
+        lateral_clip = float(cfg.get("lateral_clip", cfg["max_lin_vel_y"] / max(float(cfg["position_gain_y"]), 1.0e-6)))
+        forward_error = torch.clamp(torch.sum(reposition_delta * desired_forward_local, dim=-1), min=-forward_clip, max=forward_clip)
+        lateral_error = torch.clamp(torch.sum(reposition_delta * desired_lateral_local, dim=-1), min=-lateral_clip, max=lateral_clip)
 
-        target_lin_x = forward_error * float(cfg["position_gain_x"])
-        target_lin_y = lateral_error * float(cfg["position_gain_y"])
-        self.target_lin_vel_local[:, 0] = torch.clamp(
-            target_lin_x,
-            min=-float(cfg["max_lin_vel_x"]),
-            max=float(cfg["max_lin_vel_x"]),
+        target_lin_local = (
+            desired_forward_local * (forward_error * float(cfg["position_gain_x"])).unsqueeze(-1)
+            + desired_lateral_local * (lateral_error * float(cfg["position_gain_y"])).unsqueeze(-1)
         )
-        self.target_lin_vel_local[:, 1] = torch.clamp(
-            target_lin_y,
-            min=-float(cfg["max_lin_vel_y"]),
-            max=float(cfg["max_lin_vel_y"]),
+        direct_forward_scale = float(mode_cfg.get("direct_block_forward_scale", 0.35))
+        direct_lateral_scale = float(mode_cfg.get("direct_block_lateral_scale", 0.65))
+        target_lin_local = torch.where(
+            direct_mode.unsqueeze(-1),
+            desired_forward_local * (forward_error * float(cfg["position_gain_x"]) * direct_forward_scale).unsqueeze(-1)
+            + desired_lateral_local * (lateral_error * float(cfg["position_gain_y"]) * direct_lateral_scale).unsqueeze(-1),
+            target_lin_local,
         )
-        self.target_ang_vel_yaw[:] = torch.clamp(
+        direct_max_lin_x = float(mode_cfg.get("direct_block_max_lin_vel_x", cfg["max_lin_vel_x"]))
+        direct_max_lin_y = float(mode_cfg.get("direct_block_max_lin_vel_y", cfg["max_lin_vel_y"]))
+        max_lin_x = torch.where(
+            direct_mode,
+            torch.full_like(forward_error, direct_max_lin_x),
+            torch.full_like(forward_error, float(cfg["max_lin_vel_x"])),
+        )
+        max_lin_y = torch.where(
+            direct_mode,
+            torch.full_like(lateral_error, direct_max_lin_y),
+            torch.full_like(lateral_error, float(cfg["max_lin_vel_y"])),
+        )
+        self.raw_target_lin_vel_local[:, 0] = torch.clamp(
+            target_lin_local[:, 0],
+            min=-max_lin_x,
+            max=max_lin_x,
+        )
+        self.raw_target_lin_vel_local[:, 1] = torch.clamp(
+            target_lin_local[:, 1],
+            min=-max_lin_y,
+            max=max_lin_y,
+        )
+        direct_max_yaw = float(mode_cfg.get("direct_block_max_ang_vel_yaw", cfg["max_ang_vel_yaw"]))
+        max_yaw = torch.where(
+            direct_mode,
+            torch.full_like(self.desired_heading_error, direct_max_yaw),
+            torch.full_like(self.desired_heading_error, float(cfg["max_ang_vel_yaw"])),
+        )
+        self.raw_target_ang_vel_yaw[:] = torch.clamp(
             self.desired_heading_error * float(cfg["heading_gain"]),
-            min=-float(cfg["max_ang_vel_yaw"]),
-            max=float(cfg["max_ang_vel_yaw"]),
+            min=-max_yaw,
+            max=max_yaw,
         )
 
         weighted_pose = torch.stack(
@@ -942,17 +1362,58 @@ class PassReceiveHighLevel(BallControlK1):
         pre_contact = (~self.ball_has_been_contacted).float()
         confidence = torch.clamp(self.arrival_confidence, 0.2, 1.0)
         self.locomotion_drive[:] = torch.sigmoid((pose_error - near_dist) / drive_sigma) * confidence * pre_contact
+        self.locomotion_drive[:] = torch.where(
+            direct_mode,
+            self.locomotion_drive * float(mode_cfg.get("direct_block_drive_scale", 0.65)),
+            self.locomotion_drive,
+        )
+        walk_away_gate = (
+            (self.episode_length_buf > 0).float()
+            * pre_contact
+            * (self.locomotion_drive > float(cfg.get("walk_away_drive_threshold", 0.15))).float()
+            * (self.arrival_confidence >= float(self.cfg["estimator"].get("low_confidence_threshold", 0.35))).float()
+        )
+        self.walk_away_indicator[:] = torch.clamp(pose_error - self.prev_intercept_pose_error, min=0.0) * walk_away_gate
+        self.walk_away_precontact_distance += self.walk_away_indicator
 
         idle_gait = float(cfg["idle_gait_frequency"])
         active_gait = float(cfg["active_gait_frequency"])
-        self.target_gait_frequency[:] = idle_gait + (active_gait - idle_gait) * self.locomotion_drive
+        direct_active_gait = float(mode_cfg.get("direct_block_active_gait_frequency", active_gait))
+        self.raw_target_gait_frequency[:] = torch.where(
+            direct_mode,
+            idle_gait + (direct_active_gait - idle_gait) * self.locomotion_drive,
+            idle_gait + (active_gait - idle_gait) * self.locomotion_drive,
+        )
+        hold_mask = direct_mode & self.block_pose_ready
+        self.raw_target_lin_vel_local[hold_mask] = 0.0
+        self.raw_target_ang_vel_yaw[hold_mask] = 0.0
+        self.raw_target_gait_frequency[hold_mask] = idle_gait
+
+        lin_alpha = float(cfg.get("target_lin_vel_smoothing", 0.30))
+        yaw_alpha = float(cfg.get("target_ang_vel_smoothing", 0.28))
+        gait_alpha = float(cfg.get("target_gait_frequency_smoothing", 0.22))
+        lin_rate_limit = float(cfg.get("target_lin_vel_rate_limit", 1.4))
+        yaw_rate_limit = float(cfg.get("target_ang_vel_rate_limit", 4.5))
+        gait_rate_limit = float(cfg.get("target_gait_frequency_rate_limit", 2.0))
+
+        prev_lin = self.target_lin_vel_local.clone()
+        prev_yaw = self.target_ang_vel_yaw.clone()
+        prev_gait = self.target_gait_frequency.clone()
+
+        blended_lin = prev_lin + lin_alpha * (self.raw_target_lin_vel_local - prev_lin)
+        blended_yaw = prev_yaw + yaw_alpha * (self.raw_target_ang_vel_yaw - prev_yaw)
+        blended_gait = prev_gait + gait_alpha * (self.raw_target_gait_frequency - prev_gait)
+
+        lin_delta_limit = lin_rate_limit * self.dt
+        yaw_delta_limit = yaw_rate_limit * self.dt
+        gait_delta_limit = gait_rate_limit * self.dt
+        self.target_lin_vel_local[:] = prev_lin + torch.clamp(blended_lin - prev_lin, min=-lin_delta_limit, max=lin_delta_limit)
+        self.target_ang_vel_yaw[:] = prev_yaw + torch.clamp(blended_yaw - prev_yaw, min=-yaw_delta_limit, max=yaw_delta_limit)
+        self.target_gait_frequency[:] = prev_gait + torch.clamp(blended_gait - prev_gait, min=-gait_delta_limit, max=gait_delta_limit)
 
         step_threshold = float(cfg["step_required_distance"])
-        self.step_required[:] = pose_error > step_threshold
+        self.step_required[:] = (pose_error > step_threshold) & (~hold_mask)
         self.step_required_latched |= self.step_required
-
-        feet_delta = self.feet_pos[:, :, 0:2] - self.last_feet_pos[:, :, 0:2]
-        self.feet_speed_xy[:] = torch.norm(feet_delta / max(self.dt, 1.0e-6), dim=-1)
 
         swing_gate = self.target_gait_frequency > float(cfg["step_frequency_threshold"])
         self.step_active[:] = ((~self.feet_contact).any(dim=-1)) & swing_gate & self.step_required & (~self.ball_has_been_contacted)
@@ -972,13 +1433,14 @@ class PassReceiveHighLevel(BallControlK1):
         self.no_step_failure_latched |= (
             self.step_required_latched
             & (~self.step_event_latched)
-            & ((self.late_chase_latched | self.ball_has_passed_robot | self.ball_has_been_contacted))
+            & ((self.late_chase_latched | self.ball_has_passed_robot | self.ball_has_been_contacted | self.ball_passed_unblocked_latched))
         )
+        self.prev_intercept_pose_error[:] = pose_error
 
     def _classify_first_contact(self, first_contact_now):
         env_ids = first_contact_now.nonzero(as_tuple=False).flatten()
         if len(env_ids) == 0:
-            return
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         cfg = self.cfg["contact_classifier"]
         chosen_to_ball = self.ball_pos_local[env_ids, 0:2] - self.chosen_foot_pos_local[env_ids, 0:2]
@@ -1025,13 +1487,16 @@ class PassReceiveHighLevel(BallControlK1):
         self.support_foot_stable_at_contact[env_ids] = support_stable
         self.support_foot_stable_latched[env_ids] = support_stable
 
-        good_contact = inner_side & support_stable & (~body_contact)
+        good_contact = inner_side & support_stable & (~body_contact) & self.block_pose_ready[env_ids]
         self.good_receive_contact[env_ids] = good_contact
         self.good_receive_contact_latched[env_ids] |= good_contact
         wrong_surface = ~good_contact
         self.wrong_surface_contact_event[env_ids] = wrong_surface
         self.wrong_surface_contact_latched[env_ids] |= wrong_surface
         self.pass_progress_before_contact[env_ids] = self.ball_max_progress_along_pass[env_ids]
+        valid_contact = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        valid_contact[env_ids] = good_contact
+        return valid_contact
 
     def _compute_stance_tunnel(self):
         edge_xy = self.feet_edge_xy.view(1, 1, -1, 2)
@@ -1113,23 +1578,45 @@ class PassReceiveHighLevel(BallControlK1):
         speed_drop_thresh = float(self.cfg["rewards"]["contact_speed_drop_threshold"])
         contact_radius = float(self.cfg["rewards"]["contact_foot_radius"])
         moving_thresh = float(self.cfg["rewards"]["contact_ball_speed_threshold"])
-        first_contact_now = (
+        hard_contact = (
             (self.ball_speed_drop > speed_drop_thresh)
             & (min_foot_dist < contact_radius)
             & (ball_speed_prev > moving_thresh)
             & (~self.ball_has_been_contacted)
         )
-        self.ball_first_contact_event[:] = first_contact_now
-        self.ball_has_been_contacted |= first_contact_now
-        self._classify_first_contact(first_contact_now)
+        soft_drop_thresh = float(self.cfg["rewards"].get("soft_contact_speed_drop_threshold", 0.05))
+        soft_contact_radius = float(self.cfg["rewards"].get("soft_contact_foot_radius", contact_radius))
+        soft_contact_steps = max(1, int(self.cfg["rewards"].get("soft_contact_steps", 2)))
+        soft_contact_candidate = (
+            (self.ball_speed_drop > soft_drop_thresh)
+            & (min_foot_dist < soft_contact_radius)
+            & (ball_speed_prev > moving_thresh)
+            & (~self.ball_has_been_contacted)
+        )
+        self.soft_contact_counter[:] = torch.where(
+            soft_contact_candidate,
+            self.soft_contact_counter + 1,
+            torch.zeros_like(self.soft_contact_counter),
+        )
+        soft_contact = self.soft_contact_counter >= soft_contact_steps
+        contact_candidate_now = hard_contact | soft_contact
+        valid_contact_now = self._classify_first_contact(contact_candidate_now)
+        self.ball_first_contact_event[:] = valid_contact_now
+        self.ball_has_been_contacted |= valid_contact_now
+        self.soft_contact_counter[contact_candidate_now] = 0
+        self.ball_passed_unblocked[valid_contact_now] = False
 
         episode_time = self.episode_length_buf.float() * self.dt
-        self.ball_first_contact_time[first_contact_now] = episode_time[first_contact_now]
+        self.ball_first_contact_time[valid_contact_now] = episode_time[valid_contact_now]
         self.time_since_first_contact[:] = torch.where(
             self.ball_has_been_contacted,
             torch.clamp(episode_time - self.ball_first_contact_time, min=0.0),
             torch.zeros_like(episode_time),
         )
+        sample_time = float(self.cfg["rewards"].get("post_contact_speed_sample_time", 0.2))
+        sample_ready = self.ball_has_been_contacted & (~self.post_contact_speed_sample_valid) & (self.time_since_first_contact >= sample_time)
+        self.post_contact_speed_sample[sample_ready] = ball_speed_now[sample_ready]
+        self.post_contact_speed_sample_valid[sample_ready] = True
 
     def _update_capture_state(self):
         ball_rel = self.ball_pos_local[:, 0:2]
@@ -1140,15 +1627,35 @@ class PassReceiveHighLevel(BallControlK1):
         slow_ball = torch.norm(self.ball_lin_vel[:, 0:2], dim=-1) < float(self.cfg["receive_geometry"]["capture_speed_threshold"])
         in_front = ball_rel[:, 0] > float(self.cfg["receive_geometry"]["capture_front_min"])
         in_width = torch.abs(ball_rel[:, 1]) < float(self.cfg["receive_geometry"]["capture_lateral_max"])
-        self.capture_success[:] = slow_ball & in_front & in_width & self.ball_has_been_contacted
+        capture_candidate = slow_ball & in_front & in_width & self.ball_has_been_contacted
+        self.capture_hold_time[:] = torch.where(
+            capture_candidate,
+            self.capture_hold_time + self.dt,
+            torch.zeros_like(self.capture_hold_time),
+        )
+        capture_dwell = float(self.cfg["receive_geometry"].get("capture_dwell_s", 0.12))
+        self.capture_success[:] = self.capture_hold_time >= capture_dwell
         self.capture_success_latched |= self.capture_success
-        self.controlled_receive_success[:] = (
-            self.capture_success
+        block_hold_time = float(self.cfg.get("receive_modes", {}).get("block_hold_time", 0.15))
+        blocked_post_contact_speed_max = float(self.cfg["rewards"].get("blocked_post_contact_speed_max", 0.25))
+        front_hold_candidate = self.ball_has_been_contacted & in_front
+        self.ball_front_hold_time[:] = torch.where(
+            front_hold_candidate,
+            self.ball_front_hold_time + self.dt,
+            torch.zeros_like(self.ball_front_hold_time),
+        )
+        post_contact_speed_ok = self.post_contact_speed_sample_valid & (self.post_contact_speed_sample <= blocked_post_contact_speed_max)
+        self.block_success[:] = (
+            self.good_receive_contact_latched
+            & (self.ball_front_hold_time >= block_hold_time)
+            & post_contact_speed_ok
             & (~self.tunnel_entry_latched)
             & (~self.through_legs_latched)
-            & self.good_receive_contact_latched
-            & (~self.orbit_behind_latched)
+            & (~self.orbit_after_commit_latched)
+            & (~self.ball_passed_unblocked_latched)
         )
+        self.block_success_latched |= self.block_success
+        self.controlled_receive_success[:] = self.block_success
         self.controlled_receive_success_latched |= self.controlled_receive_success
 
     def _update_receive_state(self):
@@ -1157,8 +1664,14 @@ class PassReceiveHighLevel(BallControlK1):
         self._estimate_intercept_from_history()
         self._compute_local_foot_geometry()
         self._update_pass_frame_state()
+        self._update_feet_speed_state()
+        self._update_block_state()
+        self._update_receive_mode()
+        self._update_block_state()
         self._update_locomotion_targets()
         self._update_contact_state()
+        self.ball_passed_unblocked[:] = self.ball_passed_unblocked & (~self.ball_has_been_contacted)
+        self.ball_passed_unblocked_latched |= self.ball_passed_unblocked
         self._compute_stance_tunnel()
         self._update_capture_state()
 
@@ -1172,7 +1685,7 @@ class PassReceiveHighLevel(BallControlK1):
         self.no_step_failure_latched |= (
             self.step_required_latched
             & (~self.step_event_latched)
-            & (clear_miss_now | self.late_chase_latched | self.ball_first_contact_event)
+            & (clear_miss_now | self.late_chase_latched | self.ball_first_contact_event | self.ball_passed_unblocked_latched)
         )
 
         phase = torch.zeros_like(self.intercept_phase)
@@ -1264,6 +1777,18 @@ class PassReceiveHighLevel(BallControlK1):
             self.metric_wrong_surface.zero_()
             self.metric_side_switch.zero_()
             self.metric_pass_progress.zero_()
+            self.metric_intercept_error.zero_()
+            self.metric_intercept_jitter.zero_()
+            self.metric_intercept_target_error.zero_()
+            self.metric_walk_away.zero_()
+            self.metric_first_contact.zero_()
+            self.metric_good_contact.zero_()
+            self.metric_post_contact_speed.zero_()
+            self.metric_lead_foot.zero_()
+            self.metric_support_anchor.zero_()
+            self.metric_block_success.zero_()
+            self.metric_ball_passed_unblocked.zero_()
+            self.metric_orbit_after_commit.zero_()
             self.metric_contact[done_ids] = self.ball_has_been_contacted[done_ids].float()
             self.metric_control[done_ids] = self.controlled_receive_success_latched[done_ids].float()
             self.metric_tunnel[done_ids] = self.tunnel_entry_latched[done_ids].float()
@@ -1281,12 +1806,29 @@ class PassReceiveHighLevel(BallControlK1):
             self.metric_wrong_surface[done_ids] = self.wrong_surface_contact_latched[done_ids].float()
             self.metric_side_switch[done_ids] = self.receive_side_switch_count[done_ids]
             self.metric_pass_progress[done_ids] = self.pass_progress_before_contact[done_ids]
+            self.metric_intercept_error[done_ids] = self.intercept_estimate_error[done_ids]
+            self.metric_intercept_jitter[done_ids] = self.intercept_jitter[done_ids]
+            self.metric_intercept_target_error[done_ids] = self.intercept_target_error[done_ids]
+            self.metric_walk_away[done_ids] = self.walk_away_precontact_distance[done_ids]
+            self.metric_first_contact[done_ids] = self.ball_has_been_contacted[done_ids].float()
+            self.metric_good_contact[done_ids] = self.good_receive_contact_latched[done_ids].float()
+            self.metric_post_contact_speed[done_ids] = torch.where(
+                self.post_contact_speed_sample_valid[done_ids],
+                self.post_contact_speed_sample[done_ids],
+                torch.norm(self.ball_lin_vel[done_ids, 0:2], dim=-1),
+            )
+            self.metric_lead_foot[done_ids] = self.block_pose_ready_latched[done_ids].float()
+            self.metric_support_anchor[done_ids] = self.support_foot_anchor_latched[done_ids].float()
+            self.metric_block_success[done_ids] = self.block_success_latched[done_ids].float()
+            self.metric_ball_passed_unblocked[done_ids] = self.ball_passed_unblocked_latched[done_ids].float()
+            self.metric_orbit_after_commit[done_ids] = self.orbit_after_commit_latched[done_ids].float()
 
         if len(done_ids) > 0:
             self._reset_idx(done_ids)
             self.gym.refresh_actor_root_state_tensor(self.sim)
             self.gym.refresh_rigid_body_state_tensor(self.sim)
             self._refresh_feet_state()
+            self.last_feet_pos[done_ids] = self.feet_pos[done_ids]
             self._insert_ball_detections(done_ids, reset_timer=False)
             self.last_ball_lin_vel_world[done_ids] = 0.0
 
@@ -1321,6 +1863,18 @@ class PassReceiveHighLevel(BallControlK1):
                 "wrong_surface_first_contact_terminal": self.metric_wrong_surface,
                 "chosen_side_switch_count_terminal": self.metric_side_switch,
                 "pass_progress_before_contact_terminal": self.metric_pass_progress,
+                "intercept_estimate_error_terminal": self.metric_intercept_error,
+                "intercept_jitter_terminal": self.metric_intercept_jitter,
+                "intercept_to_pass_target_error_terminal": self.metric_intercept_target_error,
+                "walk_away_precontact_terminal": self.metric_walk_away,
+                "first_contact_rate_terminal": self.metric_first_contact,
+                "good_contact_rate_terminal": self.metric_good_contact,
+                "post_contact_ball_speed_terminal": self.metric_post_contact_speed,
+                "lead_foot_success_terminal": self.metric_lead_foot,
+                "support_anchor_success_terminal": self.metric_support_anchor,
+                "block_success_terminal": self.metric_block_success,
+                "ball_passed_unblocked_terminal": self.metric_ball_passed_unblocked,
+                "orbit_after_commit_terminal": self.metric_orbit_after_commit,
             }
         else:
             self.extras["metrics"] = {}
@@ -1339,6 +1893,7 @@ class PassReceiveHighLevel(BallControlK1):
         clear_miss_terminate = self.clear_miss_time_buf >= float(self.cfg["rewards"]["clear_miss_termination_s"])
         late_chase_terminate = self.late_chase_latched & (~self.ball_has_been_contacted)
         orbit_terminate = self.orbit_behind_latched & (~self.ball_has_been_contacted)
+        ball_passed_unblocked_terminate = self.ball_passed_unblocked_latched
         through_legs_terminate = self.through_legs_latched
         success_terminate = self.controlled_receive_success_latched
 
@@ -1351,10 +1906,34 @@ class PassReceiveHighLevel(BallControlK1):
             | clear_miss_terminate
             | late_chase_terminate
             | orbit_terminate
+            | ball_passed_unblocked_terminate
             | through_legs_terminate
             | success_terminate
         )
         self.time_out_buf = timeout_terminate
+        if self.debug_termination or self.is_play:
+            self.extras["termination"] = {
+                "contact": contact_terminate.clone(),
+                "lin_vel": lin_vel_terminate.clone(),
+                "ang_vel": ang_vel_terminate.clone(),
+                "height": height_terminate.clone(),
+                "timeout": timeout_terminate.clone(),
+                "clear_miss": clear_miss_terminate.clone(),
+                "late_chase": late_chase_terminate.clone(),
+                "orbit": orbit_terminate.clone(),
+                "ball_passed_unblocked": ball_passed_unblocked_terminate.clone(),
+                "through_legs": through_legs_terminate.clone(),
+                "success": success_terminate.clone(),
+                "ball_forward": self.ball_forward_to_block.clone(),
+                "block_line": self.block_line_forward.clone(),
+                "chosen_block_line": self.chosen_block_line.clone(),
+                "support_block_line": self.support_block_line.clone(),
+                "ball_progress_ratio": self.ball_progress_ratio.clone(),
+                "robot_progress_ratio": self.robot_progress_ratio.clone(),
+                "heading_error": self.desired_heading_error.clone(),
+            }
+        else:
+            self.extras["termination"] = {}
 
         if self.debug_termination:
             env_id = self.debug_termination_env_id
@@ -1384,6 +1963,8 @@ class PassReceiveHighLevel(BallControlK1):
                     reasons.append("late_chase")
                 if bool(orbit_terminate[env_id].item()):
                     reasons.append("orbit")
+                if bool(ball_passed_unblocked_terminate[env_id].item()):
+                    reasons.append("ball_passed_unblocked")
                 if bool(through_legs_terminate[env_id].item()):
                     reasons.append("through_legs")
                 if bool(success_terminate[env_id].item()):
@@ -1399,6 +1980,11 @@ class PassReceiveHighLevel(BallControlK1):
                     f"robot_progress={float(self.robot_progress_ratio[env_id].item()):.3f} "
                     f"progress_gap={float((self.ball_progress_ratio[env_id] - self.robot_progress_ratio[env_id]).item()):.3f} "
                     f"ball_x_local={float(self.ball_pos_local[env_id, 0].item()):.3f} "
+                    f"ball_forward={float(self.ball_forward_to_block[env_id].item()):.3f} "
+                    f"block_line={float(self.block_line_forward[env_id].item()):.3f} "
+                    f"chosen_block={float(self.chosen_block_line[env_id].item()):.3f} "
+                    f"support_block={float(self.support_block_line[env_id].item()):.3f} "
+                    f"back_margin={float(self.cfg.get('receive_modes', {}).get('ball_passed_back_margin', 0.02)):.3f} "
                     f"heading_err={heading_error:.3f}/{float(self.cfg['turn_guard']['orbit_heading_threshold']):.3f} "
                     f"ball_dist={ball_dist_local:.3f}/{float(self.cfg['turn_guard']['orbit_ball_distance']):.3f} "
                     f"lin_vel={lin_vel:.3f}/{float(self.cfg['rewards']['terminate_lin_vel']):.3f} "
@@ -1409,6 +1995,8 @@ class PassReceiveHighLevel(BallControlK1):
                     f"ball_contacted={int(self.ball_has_been_contacted[env_id].item())} "
                     f"late_chase={int(self.late_chase_latched[env_id].item())} "
                     f"orbit={int(self.orbit_behind_latched[env_id].item())} "
+                    f"orbit_commit={int(self.orbit_after_commit_latched[env_id].item())} "
+                    f"ball_passed_unblocked={int(self.ball_passed_unblocked_latched[env_id].item())} "
                     f"through={int(self.through_legs_latched[env_id].item())} "
                     f"success={int(self.controlled_receive_success_latched[env_id].item())}"
                 )
@@ -1429,6 +2017,7 @@ class PassReceiveHighLevel(BallControlK1):
                     f"miss={int(clear_miss_terminate.sum().item())} "
                     f"late={int(late_chase_terminate.sum().item())} "
                     f"orbit={int(orbit_terminate.sum().item())} "
+                    f"passed_unblocked={int(ball_passed_unblocked_terminate.sum().item())} "
                     f"through={int(through_legs_terminate.sum().item())} "
                     f"success={int(success_terminate.sum().item())} "
                     f"sample={reset_ids}"
@@ -1491,9 +2080,11 @@ class PassReceiveHighLevel(BallControlK1):
     def _compute_observations(self):
         history_age_clip = float(self.cfg["ball"].get("detection_age_clip_s", 0.25))
         hist_age = torch.clamp(self.ball_detection_history_age, 0.0, history_age_clip)
+        history_local_xy = self._points_world_to_local_xy(self.ball_detection_history_world_xy)
+        history_local_xy *= self.ball_detection_history_valid.unsqueeze(-1)
         history_obs = torch.cat(
             (
-                self.ball_detection_history_xy * self.cfg["normalization"]["ball_pos"],
+                history_local_xy * self.cfg["normalization"]["ball_pos"],
                 hist_age.unsqueeze(-1) * self.cfg["normalization"]["ball_detection_age"],
                 self.ball_detection_history_valid.unsqueeze(-1),
             ),
@@ -1522,6 +2113,7 @@ class PassReceiveHighLevel(BallControlK1):
                 (self.robot_lateral_error_to_pass * self.cfg["normalization"]["ball_pos"]).unsqueeze(-1),
                 self.receive_side_locked.float().unsqueeze(-1),
                 self.receive_side_onehot,
+                self.receive_mode_onehot,
             ),
             dim=-1,
         )
@@ -1561,6 +2153,7 @@ class PassReceiveHighLevel(BallControlK1):
                 self.wrong_surface_contact_latched.float().unsqueeze(-1),
                 self.step_required_latched.float().unsqueeze(-1),
                 self.true_step_latched.float().unsqueeze(-1),
+                self.receive_mode_onehot,
             ),
             dim=-1,
         )
@@ -1821,10 +2414,82 @@ class PassReceiveHighLevel(BallControlK1):
         delta_progress = torch.clamp(normalized_now - normalized_prev, min=0.0)
         return delta_progress * (~self.ball_has_been_contacted).float()
 
+    def _reward_walk_away_penalty(self):
+        return self.walk_away_indicator
+
     def _reward_wrong_surface_penalty(self):
         return self.wrong_surface_contact_event.float() + 0.25 * (
             self.wrong_surface_contact_latched.float() * self.ball_has_been_contacted.float()
         )
+
+    def _reward_interception_time_bonus(self):
+        episode_time = self.episode_length_buf.float() * self.dt
+        tau = float(self.cfg["rewards"].get("interception_time_tau", 2.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+        return self.ball_first_contact_event.float() * time_multiplier
+
+    def _reward_ball_speed_reduction(self):
+        min_delta = float(self.cfg["rewards"].get("ball_speed_reduction_min_delta", 0.08))
+        impact_speed_drop = torch.clamp(self.ball_speed_drop - min_delta, min=0.0)
+        foot_to_ball = self.ball_pos[:, 0:2].unsqueeze(1) - self.feet_pos[:, :, 0:2]
+        min_foot_dist = torch.norm(foot_to_ball, dim=-1).min(dim=1).values
+        proximity_sigma = max(float(self.cfg["rewards"].get("ball_speed_reduction_proximity_sigma", 0.10)), 1.0e-6)
+        proximity_gate = torch.exp(-torch.square(min_foot_dist) / proximity_sigma)
+        min_speed = float(self.cfg["rewards"].get("contact_ball_speed_threshold", 0.2))
+        ball_speed_prev = torch.norm(self.last_ball_lin_vel_world[:, 0:2], dim=-1)
+        was_moving = (ball_speed_prev > min_speed).float()
+        return impact_speed_drop * proximity_gate * was_moving
+
+    def _reward_foot_ball_proximity(self):
+        foot_to_ball = self.ball_pos[:, 0:2].unsqueeze(1) - self.feet_pos[:, :, 0:2]
+        min_dist = torch.norm(foot_to_ball, dim=-1).min(dim=1).values
+        sigma = max(float(self.cfg["rewards"].get("foot_ball_proximity_sigma", 0.15)), 1.0e-6)
+        proximity_reward = torch.exp(-torch.square(min_dist) / sigma)
+        moving_gate = (torch.norm(self.ball_lin_vel[:, 0:2], dim=-1) > float(self.cfg["rewards"].get("contact_ball_speed_threshold", 0.2))).float()
+        pre_contact = (~self.ball_has_been_contacted).float()
+        return proximity_reward * moving_gate * pre_contact
+
+    def _reward_ball_in_front_after_stop(self):
+        ball_rel_local = self.ball_pos_local
+        forward_proj = torch.clamp(ball_rel_local[:, 0], min=0.0, max=0.5) / 0.5
+        lateral_sigma = max(float(self.cfg["rewards"].get("ball_in_front_lateral_sigma", 0.12)), 1.0e-6)
+        lateral_gate = torch.exp(-torch.square(ball_rel_local[:, 1]) / lateral_sigma)
+        ball_dist = torch.norm(self.ball_pos[:, 0:2] - self.base_pos[:, 0:2], dim=-1)
+        dist_sigma = max(float(self.cfg["rewards"].get("ball_in_front_dist_sigma", 0.30)), 1.0e-6)
+        dist_gate = torch.exp(-torch.square(ball_dist) / dist_sigma)
+        speed_sigma = max(float(self.cfg["rewards"].get("ball_in_front_speed_sigma", 0.30)), 1.0e-6)
+        slow_gate = torch.exp(-torch.norm(self.ball_lin_vel[:, 0:2], dim=-1) / speed_sigma)
+        episode_time = self.episode_length_buf.float() * self.dt
+        tau = float(self.cfg["rewards"].get("ball_reward_time_decay_tau", 3.0))
+        time_multiplier = torch.exp(-episode_time / tau)
+        return forward_proj * lateral_gate * dist_gate * slow_gate * time_multiplier * self.ball_has_been_contacted.float()
+
+    def _reward_ball_travel_penalty(self):
+        max_dist = max(float(self.cfg["rewards"].get("ball_travel_penalty_max", self.cfg["turn_guard"]["progress_penalty_distance"])), 1.0e-6)
+        normalized_now = torch.clamp(self.ball_max_progress_along_pass / max_dist, 0.0, 1.0)
+        normalized_prev = torch.clamp(self.prev_ball_max_progress_along_pass / max_dist, 0.0, 1.0)
+        delta_progress = torch.clamp(normalized_now - normalized_prev, min=0.0)
+        return delta_progress * (~self.ball_has_been_contacted).float()
+
+    def _reward_block_pose_ready(self):
+        pre_contact = (~self.ball_has_been_contacted).float()
+        direct_mode = (self.receive_mode == self.RECEIVE_MODE_DIRECT_BLOCK).float()
+        return self.block_pose_ready.float() * direct_mode * pre_contact
+
+    def _reward_support_foot_anchor(self):
+        pre_contact = (~self.ball_has_been_contacted).float()
+        direct_mode = (self.receive_mode == self.RECEIVE_MODE_DIRECT_BLOCK).float()
+        return self.support_foot_anchor.float() * direct_mode * pre_contact
+
+    def _reward_block_commit_bonus(self):
+        pre_contact = (~self.ball_has_been_contacted).float()
+        return self.direct_block_enter_event.float() * (1.0 - self.late_reposition.float()) * pre_contact
+
+    def _reward_ball_passed_unblocked_penalty(self):
+        return self.ball_passed_unblocked.float()
+
+    def _reward_orbit_after_commit_penalty(self):
+        return self.orbit_after_commit.float()
 
     def _draw_debug_visuals(self):
         if not self.debug_draw_enabled or self.viewer is None:
@@ -1840,12 +2505,15 @@ class PassReceiveHighLevel(BallControlK1):
             ball_local = self.ball_pos_local[env_idx].cpu()
             intercept_local = self.intercept_point_local[env_idx].cpu()
             receive_local = self.chosen_receive_point_local[env_idx].cpu()
+            stage_local = self.chosen_body_staging_point_local[env_idx].cpu()
             pass_dir_local = self.pass_ref_dir_local[env_idx].cpu()
             desired_heading_local = self.desired_heading_vec_local[env_idx].cpu()
             tunnel_x_min = float(self.tunnel_x_min[env_idx].item())
             tunnel_x_max = float(self.tunnel_x_max[env_idx].item())
             left_y = float(self.left_tunnel_y[env_idx].item())
             right_y = float(self.right_tunnel_y[env_idx].item())
+            confidence = float(self.arrival_confidence[env_idx].item())
+            draw_estimate_lines = confidence >= float(self.cfg["estimator"]["low_confidence_threshold"])
 
             def local_to_world(local_x, local_y, z_offset):
                 local = torch.tensor([[local_x, local_y, 0.0]], device=self.device)
@@ -1855,20 +2523,72 @@ class PassReceiveHighLevel(BallControlK1):
                 return out
 
             ball_world = local_to_world(float(ball_local[0].item()), float(ball_local[1].item()), 0.06)
-            intercept_world = local_to_world(float(intercept_local[0].item()), float(intercept_local[1].item()), 0.08)
+            raw_intercept_world = np.array(
+                [
+                    float(self.intercept_point_raw_world[env_idx, 0].item()),
+                    float(self.intercept_point_raw_world[env_idx, 1].item()),
+                    base_z + 0.07,
+                ],
+                dtype=np.float32,
+            )
+            intercept_world = np.array(
+                [
+                    float(self.intercept_point_world[env_idx, 0].item()),
+                    float(self.intercept_point_world[env_idx, 1].item()),
+                    base_z + 0.08,
+                ],
+                dtype=np.float32,
+            )
+            truth_world = np.array(
+                [
+                    float(self.intercept_truth_point_world[env_idx, 0].item()),
+                    float(self.intercept_truth_point_world[env_idx, 1].item()),
+                    base_z + 0.11,
+                ],
+                dtype=np.float32,
+            )
+            pass_target_world = np.array(
+                [
+                    float(self.pass_target_xy[env_idx, 0].item()),
+                    float(self.pass_target_xy[env_idx, 1].item()),
+                    base_z + 0.09,
+                ],
+                dtype=np.float32,
+            )
             receive_world = local_to_world(float(receive_local[0].item()), float(receive_local[1].item()), 0.08)
+            stage_world = local_to_world(float(stage_local[0].item()), float(stage_local[1].item()), 0.08)
 
-            ball_line = np.array(
-                [ball_world[0], ball_world[1], ball_world[2], intercept_world[0], intercept_world[1], intercept_world[2]],
+            if draw_estimate_lines:
+                raw_line = np.array(
+                    [ball_world[0], ball_world[1], ball_world[2], raw_intercept_world[0], raw_intercept_world[1], raw_intercept_world[2]],
+                    dtype=np.float32,
+                )
+                self.gym.add_lines(self.viewer, env_handle, 1, raw_line, np.array([0.15, 0.45, 1.0], dtype=np.float32))
+
+                ball_line = np.array(
+                    [ball_world[0], ball_world[1], ball_world[2], intercept_world[0], intercept_world[1], intercept_world[2]],
+                    dtype=np.float32,
+                )
+                self.gym.add_lines(self.viewer, env_handle, 1, ball_line, np.array([0.2, 0.8, 1.0], dtype=np.float32))
+
+                stage_line = np.array(
+                    [intercept_world[0], intercept_world[1], intercept_world[2], stage_world[0], stage_world[1], stage_world[2]],
+                    dtype=np.float32,
+                )
+                self.gym.add_lines(self.viewer, env_handle, 1, stage_line, np.array([0.0, 1.0, 0.6], dtype=np.float32))
+
+            if self.debug_show_intercept_truth:
+                truth_line = np.array(
+                    [ball_world[0], ball_world[1], ball_world[2], truth_world[0], truth_world[1], truth_world[2]],
+                    dtype=np.float32,
+                )
+                self.gym.add_lines(self.viewer, env_handle, 1, truth_line, np.array([1.0, 0.2, 0.9], dtype=np.float32))
+
+            target_line = np.array(
+                [pass_target_world[0], pass_target_world[1], pass_target_world[2] - 0.03, pass_target_world[0], pass_target_world[1], pass_target_world[2] + 0.03],
                 dtype=np.float32,
             )
-            self.gym.add_lines(self.viewer, env_handle, 1, ball_line, np.array([1.0, 0.9, 0.0], dtype=np.float32))
-
-            receive_line = np.array(
-                [intercept_world[0], intercept_world[1], intercept_world[2], receive_world[0], receive_world[1], receive_world[2]],
-                dtype=np.float32,
-            )
-            self.gym.add_lines(self.viewer, env_handle, 1, receive_line, np.array([0.0, 1.0, 1.0], dtype=np.float32))
+            self.gym.add_lines(self.viewer, env_handle, 1, target_line, np.array([1.0, 0.95, 0.2], dtype=np.float32))
 
             pass_line_end = local_to_world(float(pass_dir_local[0].item()) * 0.4, float(pass_dir_local[1].item()) * 0.4, 0.10)
             pass_line = np.array(
@@ -1970,17 +2690,31 @@ class PassReceiveHighLevel(BallControlK1):
 
         robot_px = local_to_panel(0.0, 0.0)
         ball_px = local_to_panel(float(self.ball_pos_local[env_idx, 0].item()), float(self.ball_pos_local[env_idx, 1].item()))
+        raw_intercept_px = local_to_panel(float(self.intercept_point_raw_local[env_idx, 0].item()), float(self.intercept_point_raw_local[env_idx, 1].item()))
         intercept_px = local_to_panel(float(self.intercept_point_local[env_idx, 0].item()), float(self.intercept_point_local[env_idx, 1].item()))
+        truth_px = local_to_panel(float(self.intercept_truth_point_local[env_idx, 0].item()), float(self.intercept_truth_point_local[env_idx, 1].item()))
+        pass_target_px = local_to_panel(float(self.pass_target_local[env_idx, 0].item()), float(self.pass_target_local[env_idx, 1].item()))
         receive_px = local_to_panel(float(self.chosen_receive_point_local[env_idx, 0].item()), float(self.chosen_receive_point_local[env_idx, 1].item()))
+        stage_px = local_to_panel(float(self.chosen_body_staging_point_local[env_idx, 0].item()), float(self.chosen_body_staging_point_local[env_idx, 1].item()))
         foot_px = local_to_panel(float(self.chosen_foot_pos_local[env_idx, 0].item()), float(self.chosen_foot_pos_local[env_idx, 1].item()))
+        draw_estimate_lines = float(self.arrival_confidence[env_idx].item()) >= float(self.cfg["estimator"]["low_confidence_threshold"])
 
         draw_circle(*robot_px, 5, (220, 80, 80))
         draw_circle(*ball_px, 4, (40, 40, 220))
+        draw_circle(*raw_intercept_px, 3, (40, 120, 240))
         draw_circle(*intercept_px, 4, (40, 220, 220))
+        draw_circle(*pass_target_px, 4, (240, 220, 40))
+        if self.debug_show_intercept_truth:
+            draw_circle(*truth_px, 4, (220, 40, 220))
         draw_circle(*receive_px, 4, (40, 220, 40))
+        draw_circle(*stage_px, 4, (240, 210, 60))
         draw_circle(*foot_px, 4, (220, 40, 220))
-        draw_line(ball_px[0], ball_px[1], intercept_px[0], intercept_px[1], (60, 200, 240), thickness=1)
-        draw_line(intercept_px[0], intercept_px[1], receive_px[0], receive_px[1], (60, 240, 60), thickness=1)
+        if draw_estimate_lines:
+            draw_line(ball_px[0], ball_px[1], raw_intercept_px[0], raw_intercept_px[1], (40, 120, 240), thickness=1)
+            draw_line(ball_px[0], ball_px[1], intercept_px[0], intercept_px[1], (60, 200, 240), thickness=1)
+            draw_line(intercept_px[0], intercept_px[1], stage_px[0], stage_px[1], (60, 240, 120), thickness=1)
+        if self.debug_show_intercept_truth:
+            draw_line(ball_px[0], ball_px[1], truth_px[0], truth_px[1], (240, 80, 220), thickness=1)
 
         pass_dir_end = local_to_panel(
             float(self.pass_ref_dir_local[env_idx, 0].item()) * 0.35,

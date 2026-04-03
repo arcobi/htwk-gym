@@ -1,5 +1,7 @@
 import os
 import glob
+import json
+import shutil
 import yaml
 import argparse
 import torch
@@ -58,3 +60,28 @@ if __name__ == "__main__":
     save_path = os.path.splitext(cfg["basic"]["checkpoint"])[0] + ".pt"
     script_module.save(save_path)
     print(f"Saved model to {save_path}")
+
+    metadata = cfg.get("metadata", {}).copy()
+    metadata["task"] = args.task
+    metadata["model_class"] = cfg.get("basic", {}).get("model", "BaseActorCritic")
+    metadata["num_actions"] = cfg["env"]["num_actions"]
+    metadata["num_observations"] = cfg["env"]["num_observations"]
+    metadata["num_privileged_obs"] = cfg["env"]["num_privileged_obs"]
+    metadata["normalization"] = cfg.get("normalization", {})
+    if "commands" in cfg:
+        metadata["commands"] = cfg["commands"]
+    metadata_path = os.path.splitext(save_path)[0] + ".metadata.json"
+    with open(metadata_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, indent=2)
+    print(f"Saved metadata to {metadata_path}")
+
+    policy_name = metadata.get("policy_name")
+    if policy_name:
+        deploy_model_dir = os.path.join("deploy", "models")
+        os.makedirs(deploy_model_dir, exist_ok=True)
+        deploy_model_path = os.path.join(deploy_model_dir, f"{policy_name}.pt")
+        deploy_metadata_path = os.path.join(deploy_model_dir, f"{policy_name}.metadata.json")
+        shutil.copy2(save_path, deploy_model_path)
+        shutil.copy2(metadata_path, deploy_metadata_path)
+        print(f"Copied deploy model to {deploy_model_path}")
+        print(f"Copied deploy metadata to {deploy_metadata_path}")

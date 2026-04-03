@@ -183,6 +183,7 @@ class Runner:
         parser.add_argument("--model", type=str, help="Model class name to use (e.g., BaseActorCritic, OdometryActorCritic). Overrides config file if provided.")
         # Video recording mode arguments (for separate process recording)
         parser.add_argument("--record_video_mode", action="store_true", help="Enable video recording mode (record and exit).")
+        parser.add_argument("--disable_record_video", action="store_true", help="Disable video recording even if the config enables it.")
         parser.add_argument("--video_duration", type=float, help="Duration of video to record in seconds.")
         parser.add_argument("--video_iteration", type=int, help="Iteration number for wandb logging.")
         parser.add_argument("--video_output_path", type=str, help="Path where to save the video file.")
@@ -205,6 +206,8 @@ class Runner:
                     self.cfg["basic"][arg] = getattr(self.args, arg)
         if self.args.record_video_mode:
             self.cfg["viewer"]["record_video"] = True
+        elif self.args.disable_record_video:
+            self.cfg["viewer"]["record_video"] = False
         elif not self.test:
             # Disable video recording in training process - videos will be recorded in separate process
             self.cfg["viewer"]["record_video"] = False
@@ -434,10 +437,12 @@ class Runner:
                 kl_mean = torch.mean(kl)
 
                 # Adapt learning rate based on KL divergence
+                lr_min = float(self.cfg["algorithm"].get("adaptive_lr_min", 1e-5))
+                lr_max = float(self.cfg["algorithm"].get("adaptive_lr_max", 1e-2))
                 if kl_mean > self.cfg["algorithm"]["desired_kl"] * 2:
-                    self.learning_rate = max(1e-5, self.learning_rate / 1.5)
+                    self.learning_rate = max(lr_min, self.learning_rate / 1.5)
                 elif kl_mean < self.cfg["algorithm"]["desired_kl"] / 2:
-                    self.learning_rate = min(1e-2, self.learning_rate * 1.5)
+                    self.learning_rate = min(lr_max, self.learning_rate * 1.5)
 
                 for param_group in self.optimizer.param_groups:
                     param_group["lr"] = self.learning_rate
@@ -490,6 +495,34 @@ class Runner:
                 act = dist.loc
                 obs, rew, done, infos = self.env.step(act)
                 obs, rew, done = obs.to(self.device), rew.to(self.device), done.to(self.device)
+            if done[0]:
+                termination = infos.get("termination", {})
+                if termination:
+                    reason_order = [
+                        "contact",
+                        "lin_vel",
+                        "ang_vel",
+                        "height",
+                        "timeout",
+                        "clear_miss",
+                        "late_chase",
+                        "orbit",
+                        "ball_passed_unblocked",
+                        "through_legs",
+                        "success",
+                    ]
+                    reasons = [name for name in reason_order if bool(termination[name][0].item())]
+                    print(
+                        "[play termination] "
+                        f"reasons={','.join(reasons) if reasons else 'unknown'} "
+                        f"ball_progress={float(termination['ball_progress_ratio'][0].item()):.3f} "
+                        f"robot_progress={float(termination['robot_progress_ratio'][0].item()):.3f} "
+                        f"heading_err={float(termination['heading_error'][0].item()):.3f} "
+                        f"ball_forward={float(termination['ball_forward'][0].item()):.3f} "
+                        f"block_line={float(termination['block_line'][0].item()):.3f} "
+                        f"chosen_block={float(termination['chosen_block_line'][0].item()):.3f} "
+                        f"support_block={float(termination['support_block_line'][0].item()):.3f}"
+                    )
             if self.cfg["viewer"]["record_video"]:
                 record_time -= self.env.dt
                 if record_time < 0:

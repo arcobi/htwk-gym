@@ -1,0 +1,396 @@
+basic:
+  checkpoint: null
+  headless: true
+  max_iterations: 20000
+  sim_device: "cuda:0"
+  rl_device: "cuda:0"
+  seed: 42
+  debug_termination: true
+  debug_termination_interval: 100
+  debug_termination_max_envs: 5
+  description: "Reusable K1 omni-directional locomotion foundation policy"
+  task: "K1/Foundation_Walk_K1"
+  model: "BaseActorCritic"
+
+env:
+  num_envs: 1024
+  num_observations: 54
+  num_privileged_obs: 14
+  num_actions: 12
+  env_spacing: 1.0
+
+runner:
+  horizon_length: 48
+  mini_epochs: 10
+  save_interval: 1000
+  use_wandb: true
+  log_video_interval: 500
+  log_video_duration: 42.0
+  log_reward_terms: true
+  log_env_metrics: true
+
+viewer:
+  pos: [3.0, -3.0, 2.0]
+  lookat: [0.0, 0.0, 0.0]
+  record_video: true
+  record_interval: 5.0
+  record_env_idx: 0
+
+algorithm:
+  learning_rate: 1.0e-5
+  adaptive_lr_min: 1.0e-5
+  adaptive_lr_max: 3.0e-5
+  gamma: 0.995
+  lam: 0.95
+  bound_coef: 1.0
+  entropy_coef: -0.01
+  symmetric_coef: 10.0
+  desired_kl: 0.01
+  value_clip_param: 0.2
+  min_entropy: -14
+  max_entropy: -5.0
+
+sim:
+  dt: 0.002
+  substeps: 1
+  up_axis: "z"
+  gravity: [0.0, 0.0, -9.81]
+  physics_engine: "physx"
+  physx:
+    num_threads: 4
+    solver_type: 1
+    num_position_iterations: 8
+    num_velocity_iterations: 4
+    contact_offset: 0.02
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.2
+    max_depenetration_velocity: 1.0
+    default_buffer_size_multiplier: 5.0
+    max_gpu_contact_pairs: 8388608
+    num_subscenes: 4
+    contact_collection: 1
+
+asset:
+  file: "resources/K1/K1_locomotion.urdf"
+  mujoco_file: "resources/K1/K1_locomotion.xml"
+  name: "K1"
+  base_name: "Trunk"
+  foot_names: ["left_foot_link", "right_foot_link"]
+  disable_gravity: false
+  default_dof_drive_mode: 3
+  collapse_fixed_joints: true
+  fix_base_link: false
+  self_collisions: 0
+  replace_cylinder_with_capsule: false
+  flip_visual_attachments: false
+  density: 0.001
+  angular_damping: 0.0
+  linear_damping: 0.0
+  max_angular_velocity: 1000.0
+  max_linear_velocity: 1000.0
+  armature: 0.0
+  thickness: 0.01
+  feet_edge_pos: [[0.11, 0.04, -0.02],
+                  [0.11, -0.04, -0.02],
+                  [-0.07, 0.04, -0.02],
+                  [-0.07, -0.04, -0.02]]
+
+init_state:
+  pos: [0.0, 0.0, 0.62]
+  rot: [0.0, 0.0, 0.0, 1.0]
+  lin_vel: [0.0, 0.0, 0.0]
+  ang_vel: [0.0, 0.0, 0.0]
+  default_joint_angles: {"Hip_Pitch": -0.16, "Knee_Pitch": 0.32, "Ankle_Pitch": -0.20, "default": 0.0}
+
+control:
+  stiffness: {"Hip_Pitch": 80.0, "Hip_Roll": 80.0, "Hip_Yaw": 80.0, "Knee": 80.0, "Ankle": 30.0}
+  damping: {"Hip_Pitch": 2.0, "Hip_Roll": 2.0, "Hip_Yaw": 2.0, "Knee": 2.0, "Ankle": 2.0}
+  armature: {"Hip_Pitch": 0.0478125, "Hip_Roll": 0.0339552, "Hip_Yaw": 0.0282528, "Knee": 0.095625, "Ankle": 0.0565056}
+  effort_limit: {"Hip_Pitch": 30.0, "Hip_Roll": 35.0, "Hip_Yaw": 20.0, "Knee": 40.0, "Ankle": 20.0}
+  velocity_limit: {"Hip_Pitch": 8.0, "Hip_Roll": 12.9, "Hip_Yaw": 18.0, "Knee": 12.5, "Ankle": 18.0}
+  action_scale: 1.0
+  decimation: 10
+
+terrain:
+  type: "plane"
+  static_friction: 1.0
+  dynamic_friction: 1.0
+  restitution: 0.0
+  terrain_length: 10.0
+  terrain_width: 10.0
+  border_size: 5.0
+  num_terrains: 8
+  terrain_proportions: [0.0, 0.0, 0.5, 0.5]
+  slope: 0.1
+  random_height: 0.1
+  discrete_height: 0.02
+  horizontal_scale: 0.1
+  vertical_scale: 0.005
+  slope_threshold: 2.0
+
+commands:
+  num_core_commands: 4
+  num_advanced_commands: 6
+  resampling_time_s: [5.0, 8.0]
+  core:
+    travel_vel_x_world: [-1.0, 1.0]
+    travel_vel_y_world: [-0.8, 0.8]
+    heading_offset: [-2.09439510239, 2.09439510239]
+    drive: [0.45, 1.0]
+    turn_drive: [0.35, 0.85]
+  advanced:
+    modifier_probability: 0.45
+    gait_frequency_bias: [-0.35, 0.35]
+    foot_yaw_bias_left: [-0.25, 0.25]
+    foot_yaw_bias_right: [-0.25, 0.25]
+    body_pitch_target: [-0.12, 0.18]
+    body_roll_target: [-0.12, 0.12]
+    stance_width_target: [0.17, 0.24]
+  adapter:
+    max_ang_vel_yaw: 1.4
+    heading_gain: 1.6
+    stand_drive_threshold: 0.05
+    idle_gait_frequency: 1.2
+    active_gait_frequency: 2.2
+    gait_frequency_clip: [1.2, 2.6]
+    body_pitch_gain: 0.10
+    body_roll_gain: -0.10
+    stance_width_nominal: 0.19
+    stance_width_from_lateral_gain: 0.03
+    stance_width_from_yaw_gain: 0.02
+    foot_yaw_from_yaw_gain: 0.18
+    foot_yaw_target_clip: [-0.45, 0.45]
+  eval:
+    enabled_in_play: true
+    cycle: true
+    cases:
+      - name: "stand"
+        duration_s: 3.0
+        core: [0.0, 0.0, 0.0]
+      - name: "forward_0p4"
+        duration_s: 3.0
+        core: [0.4, 0.0, 0.0]
+      - name: "forward_0p7"
+        duration_s: 10.0
+        core: [0.7, 0.0, 0.0]
+      - name: "lateral_0p3"
+        duration_s: 10.0
+        core: [0.0, 0.3, 1.57079632679]
+      - name: "diagonal_0p4_0p2"
+        duration_s: 10.0
+        core: [0.4, 0.2, 0.463647609001]
+      - name: "yaw_only"
+        duration_s: 6.0
+        core: [0.0, 0.0, 1.57079632679]
+  training_phases:
+    - start_iteration: 0
+      group_weights: [0.05, 0.95, 0.00, 0.00, 0.00]
+      modifier_probability: 0.00
+      disturbance_scale: 0.0
+      resampling_time_s: [3.0, 5.0]
+      core:
+        travel_vel_x_world: [0.25, 0.70]
+        travel_vel_y_world: [0.0, 0.0]
+        heading_offset: [-0.17, 0.17]
+        drive: [0.75, 1.0]
+        turn_drive: [0.0, 0.0]
+    - start_iteration: 3000
+      group_weights: [0.05, 0.60, 0.20, 0.05, 0.10]
+      modifier_probability: 0.15
+      disturbance_scale: 0.4
+      resampling_time_s: [4.0, 6.0]
+      core:
+        travel_vel_x_world: [0.0, 0.90]
+        travel_vel_y_world: [-0.25, 0.25]
+        heading_offset: [-0.35, 0.35]
+        drive: [0.60, 1.0]
+        turn_drive: [0.35, 0.70]
+    - start_iteration: 8000
+      group_weights: [0.10, 0.35, 0.25, 0.10, 0.20]
+      modifier_probability: 0.30
+      disturbance_scale: 1.0
+      resampling_time_s: [5.0, 8.0]
+      core:
+        travel_vel_x_world: [-1.0, 1.0]
+        travel_vel_y_world: [-0.8, 0.8]
+        heading_offset: [-2.09439510239, 2.09439510239]
+        drive: [0.45, 1.0]
+        turn_drive: [0.35, 0.85]
+
+normalization:
+  gravity: 1.0
+  lin_vel: 1.0
+  ang_vel: 1.0
+  gait_frequency: 0.5
+  foot_yaw: 1.0
+  body_pitch_target: 1.0
+  body_roll_target: 1.0
+  stance_width_target: 4.0
+  dof_pos: 1.0
+  dof_vel: 0.1
+  filter_weight: 0.1
+  push_force: 0.1
+  push_torque: 0.5
+  clip_actions: 1.0
+
+noise:
+  gravity:
+    range: [0.0, 0.01]
+    operation: "additive"
+    distribution: "gaussian"
+  lin_vel:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  ang_vel:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_pos:
+    range: [0.0, 0.01]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_vel:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  height:
+    range: [0.0, 0.02]
+    operation: "additive"
+    distribution: "gaussian"
+
+randomization:
+  init_dof_pos:
+    range: [0.0, 0.05]
+    operation: "additive"
+    distribution: "gaussian"
+  init_base_pos_xy:
+    range: [-1.0, 1.0]
+    operation: "additive"
+    distribution: "uniform"
+  init_base_lin_vel_xy:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  kick_interval_s: 2.0
+  kick_lin_vel:
+    range: [0.0, 0.1]
+    operation: "additive"
+    distribution: "gaussian"
+  kick_ang_vel:
+    range: [0.0, 0.02]
+    operation: "additive"
+    distribution: "gaussian"
+  push_interval_s: 5.0
+  push_duration_s: 1.0
+  push_force:
+    range: [0.0, 10.0]
+    operation: "additive"
+    distribution: "gaussian"
+  push_torque:
+    range: [0.0, 2.0]
+    operation: "additive"
+    distribution: "gaussian"
+  dof_stiffness:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  dof_damping:
+    range: [0.95, 1.05]
+    operation: "scaling"
+    distribution: "uniform"
+  dof_friction:
+    range: [0.0, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  friction:
+    range: [0.1, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  compliance:
+    range: [0.5, 1.5]
+    operation: "additive"
+    distribution: "uniform"
+  restitution:
+    range: [0.1, 0.9]
+    operation: "additive"
+    distribution: "uniform"
+  base_com:
+    range: [-0.1, 0.1]
+    operation: "additive"
+    distribution: "uniform"
+  base_mass:
+    range: [0.8, 1.2]
+    operation: "scaling"
+    distribution: "uniform"
+  other_com:
+    range: [-0.005, 0.005]
+    operation: "additive"
+    distribution: "uniform"
+  other_mass:
+    range: [0.98, 1.02]
+    operation: "scaling"
+    distribution: "uniform"
+
+rewards:
+  episode_length_s: 20.0
+  terminate_vel: 50.0
+  terminate_height: 0.25
+  base_height_target: 0.57
+  tracking_sigma: 0.25
+  heading_sigma: 0.18
+  swing_period: 0.32
+  swing_clearance_target: 0.14
+  swing_clearance_sigma: 0.02
+  scuff_clearance_threshold: 0.03
+  step_reach_min: 0.05
+  step_reach_max: 0.16
+  step_reach_gain: 0.12
+  step_reach_sigma: 0.015
+  soft_dof_pos_limit: 0.9
+  soft_dof_vel_limit: 0.9
+  soft_torque_limit: 0.9
+  only_positive_rewards: false
+  penalize_contacts_on: ["Hip", "Trunk"]
+  terminate_contacts_on: []
+  scales:
+    survival: 0.20
+    tracking_lin_vel_x: 1.5
+    tracking_lin_vel_y: 1.5
+    tracking_ang_vel: 0.8
+    heading: 0.6
+    contact_timing: 2.0
+    swing_clearance: 1.5
+    step_reach: 1.5
+    command_progress: 1.0
+    base_height: -3.0
+    orientation: -1.0
+    stance_width: -0.5
+    foot_yaw: -0.3
+    collision: -5.0
+    lin_vel_z: -1.5
+    ang_vel_xy: -0.2
+    torques: -0.00002
+    dof_vel: -0.0005
+    dof_acc: -0.0000001
+    root_acc: -0.0002
+    action_rate: -0.01
+    dof_pos_limits: -2.0
+    dof_vel_limits: -0.5
+    torque_limits: -0.5
+    power: -0.00002
+    feet_slip: -1.2
+    scuff_penalty: -0.8
+    double_support_drag: -1.0
+
+metadata:
+  policy_name: "foundation_walk_k1"
+  public_core_command_order: [travel_vel_x_world, travel_vel_y_world, desired_heading_world]
+  public_advanced_command_order: [gait_frequency_bias, foot_yaw_bias_left, foot_yaw_bias_right, body_pitch_target, body_roll_target, stance_width_target]
+  observation_command_block_order: [vx_local, vy_local, heading_error_sin, heading_error_cos, gait_frequency_target, foot_yaw_left_target, foot_yaw_right_target, body_pitch_target, body_roll_target, stance_width_target]
+  fallback_behavior:
+    gait_frequency_target: "idle_to_active_from_drive_plus_bias"
+    foot_yaw_targets: "yaw_from_heading_error_rate_plus_biases"
+    body_pitch_target: "derived_from_local_vx_when_advanced_modifiers_absent"
+    body_roll_target: "derived_from_local_vy_when_advanced_modifiers_absent"
+    stance_width_target: "derived_from_local_vy_and_heading_error_when_advanced_modifiers_absent"

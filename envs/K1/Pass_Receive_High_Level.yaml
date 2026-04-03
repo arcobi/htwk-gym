@@ -15,8 +15,8 @@ basic:
 
 env:
   num_envs: 2048
-  num_observations: 90
-  num_privileged_obs: 55
+  num_observations: 92
+  num_privileged_obs: 57
   num_actions: 13
   env_spacing: 3.0
   detection_history_len: 6
@@ -28,8 +28,8 @@ runner:
   use_wandb: true
   log_video_interval: 500
   log_video_duration: 30.0
-  log_reward_terms: true
-  log_env_metrics: true
+  log_reward_terms: false
+  log_env_metrics: false
 
 viewer:
   pos: [3.0, -3.0, 2.0]
@@ -38,6 +38,7 @@ viewer:
   record_interval: 60.0
   record_env_idx: 0
   show_debug_viz: true
+  debug_show_intercept_truth: true
   debug_env_count: 1
   debug_video_overlay: true
   debug_video_panel_size: 220
@@ -112,9 +113,9 @@ ball:
   rolling_friction: 0.3
   torsion_friction: 0.1
   density: 200
-  detection_fps: 30.0
-  detection_fps_jitter: 0.15
-  detection_dropout_prob: 0.08
+  detection_fps: 45.0
+  detection_fps_jitter: 0.08
+  detection_dropout_prob: 0.04
   detection_age_clip_s: 0.25
 
 init_state:
@@ -152,8 +153,8 @@ terrain:
   slope_threshold: 2.0
 
 commands:
-  gait_frequency_base: 2.0
-  gait_frequency_offset_clip: 0.5
+  gait_frequency_base: 1.85
+  gait_frequency_offset_clip: 0.35
 
 normalization:
   gravity: 1.0
@@ -320,22 +321,36 @@ estimator:
   speed_conf_sigma: 0.08
   fit_residual_sigma: 0.02
   max_recent_age: 0.25
-  receive_plane_x: 0.08
-  min_plane_speed: 0.05
+  min_anchor_speed: 0.05
   time_clip_s: 2.0
   low_confidence_threshold: 0.35
+  anchor_confidence_threshold: 0.40
+  hold_confidence_threshold: 0.20
+  stable_confidence_threshold: 0.55
+  smoothing_alpha_low: 0.18
+  smoothing_alpha_high: 0.55
+  max_stable_target_shift_per_step: 0.05
 
 receive_geometry:
   foot_forward_contact_offset: 0.03
   foot_inner_contact_offset: 0.04
   robot_nominal_reposition_speed: 0.25
+  body_staging_backoff: 0.20
+  body_staging_center_pull: 0.05
+  body_staging_lateral_scale: 0.55
+  body_staging_lateral_max: 0.10
+  body_staging_forward_weight: 0.35
+  body_staging_lateral_weight: 1.0
   safe_gap_margin: 0.005
-  wide_gap_target: 0.05
+  wide_gap_target: 0.03
+  block_pose_forward_margin: 0.03
+  block_pose_lateral_tolerance: 0.04
   capture_zone_center: [0.18, 0.0]
   capture_zone_sigma: [0.16, 0.12]
   capture_speed_threshold: 0.18
   capture_front_min: 0.04
   capture_lateral_max: 0.18
+  capture_dwell_s: 0.12
 
 turn_guard:
   receive_heading_side_bias: 0.22
@@ -352,23 +367,49 @@ turn_guard:
   progress_penalty_distance: 1.20
 
 locomotion_targets:
-  position_gain_x: 2.2
-  position_gain_y: 4.6
-  heading_gain: 2.4
-  max_lin_vel_x: 0.30
-  max_lin_vel_y: 0.85
-  max_ang_vel_yaw: 1.80
-  idle_gait_frequency: 1.60
-  active_gait_frequency: 2.50
+  position_gain_x: 1.8
+  position_gain_y: 2.8
+  heading_gain: 1.6
+  max_lin_vel_x: 0.18
+  max_lin_vel_y: 0.36
+  max_ang_vel_yaw: 0.85
+  idle_gait_frequency: 1.35
+  active_gait_frequency: 2.05
   near_distance: 0.05
-  drive_sigma: 0.03
-  step_required_distance: 0.08
+  drive_sigma: 0.05
+  step_required_distance: 0.06
   step_frequency_threshold: 1.20
-  locomotion_speed_threshold: 0.08
-  skate_speed_threshold: 0.10
-  forward_clip: 0.06
-  lateral_error_weight: 1.8
-  forward_error_weight: 0.6
+  locomotion_speed_threshold: 0.06
+  skate_speed_threshold: 0.09
+  forward_clip: 0.05
+  lateral_clip: 0.15
+  lateral_error_weight: 1.2
+  forward_error_weight: 0.8
+  target_lin_vel_smoothing: 0.30
+  target_ang_vel_smoothing: 0.28
+  target_gait_frequency_smoothing: 0.22
+  target_lin_vel_rate_limit: 1.40
+  target_ang_vel_rate_limit: 4.50
+  target_gait_frequency_rate_limit: 2.00
+  walk_away_drive_threshold: 0.15
+
+receive_modes:
+  direct_block_time_threshold: 0.45
+  direct_block_pose_error_threshold: 0.06
+  block_hold_time: 0.15
+  phase_lock_on_side_select: true
+  direct_block_phase_left: 0.15
+  direct_block_phase_right: 0.65
+  direct_block_max_lin_vel_x: 0.08
+  direct_block_max_lin_vel_y: 0.20
+  direct_block_max_ang_vel_yaw: 0.45
+  direct_block_active_gait_frequency: 1.75
+  direct_block_forward_scale: 0.35
+  direct_block_lateral_scale: 0.65
+  direct_block_drive_scale: 0.65
+  block_pose_heading_tolerance: 0.25
+  ball_passed_back_margin: 0.02
+  orbit_after_commit_heading_threshold: 0.75
 
 contact_classifier:
   side_lock_conf_threshold: 0.55
@@ -390,61 +431,73 @@ curriculum:
 
 pass_generator:
   family_weights:
-    - [0.05, 0.28, 0.00, 0.16, 0.16, 0.18, 0.17]
-    - [0.10, 0.25, 0.05, 0.18, 0.18, 0.12, 0.12]
-    - [0.16, 0.22, 0.12, 0.16, 0.16, 0.09, 0.09]
-    - [0.20, 0.18, 0.18, 0.16, 0.16, 0.06, 0.06]
+    - [0.01, 0.10, 0.05, 0.30, 0.30, 0.12, 0.12]
+    - [0.02, 0.10, 0.06, 0.27, 0.27, 0.14, 0.14]
+    - [0.04, 0.10, 0.08, 0.24, 0.24, 0.15, 0.15]
+    - [0.05, 0.10, 0.10, 0.22, 0.22, 0.15, 0.16]
   distance_min: [0.75, 0.90, 1.10, 1.35]
   distance_max: [1.05, 1.25, 1.55, 1.95]
-  speed_min: [0.45, 0.60, 0.85, 1.10]
-  speed_max: [0.75, 0.95, 1.20, 1.55]
-  fast_speed_min: [0.90, 1.10, 1.40, 1.75]
-  fast_speed_max: [1.10, 1.35, 1.70, 2.05]
+  speed_min: [0.85, 1.00, 1.20, 1.45]
+  speed_max: [1.10, 1.30, 1.55, 1.90]
+  fast_speed_min: [1.35, 1.55, 1.80, 2.10]
+  fast_speed_max: [1.65, 1.90, 2.15, 2.45]
   target_x_min: [0.05, 0.05, 0.04, 0.04]
   target_x_max: [0.14, 0.14, 0.12, 0.12]
-  target_y_max: [0.18, 0.20, 0.22, 0.24]
-  centerline_target_sigma: [0.02, 0.03, 0.04, 0.05]
-  center_angle_deg_std: [3.0, 5.0, 7.0, 9.0]
-  shallow_angle_deg_min: [12.0, 14.0, 16.0, 18.0]
-  shallow_angle_deg_max: [18.0, 22.0, 26.0, 30.0]
+  target_y_max: [0.24, 0.25, 0.22, 0.24]
+  centerline_target_sigma: [0.03, 0.04, 0.04, 0.05]
+  center_angle_deg_std: [5.0, 6.0, 7.0, 9.0]
+  shallow_angle_deg_min: [15.0, 16.0, 16.0, 18.0]
+  shallow_angle_deg_max: [24.0, 26.0, 26.0, 30.0]
   short_distance_min: [0.55, 0.65, 0.75, 0.85]
   short_distance_max: [0.85, 0.95, 1.05, 1.15]
-  short_speed_min: [0.35, 0.45, 0.55, 0.65]
-  short_speed_max: [0.65, 0.80, 0.95, 1.05]
-  foot_target_y: [0.13, 0.14, 0.15, 0.16]
+  short_speed_min: [0.65, 0.80, 0.95, 1.15]
+  short_speed_max: [0.95, 1.10, 1.25, 1.45]
+  foot_target_y: [0.15, 0.16, 0.15, 0.16]
+  offcenter_target_y_min: [0.08, 0.10, 0.10, 0.12]
 
 rewards:
   scales:
     survival: 0.20
     stability: 0.75
-    intercept_pos: 2.0
+    intercept_pos: 3.0
     intercept_time: 1.5
     heading: 0.6
     side_foot_yaw: 1.5
     stance_narrow_when_needed: 1.4
     no_tunnel: 2.0
-    contact_quality: 3.0
+    contact_quality: 4.0
     capture_zone: 2.4
-    tracking_lin_vel_x: 0.9
-    tracking_lin_vel_y: 1.0
-    tracking_ang_vel: 0.7
-    gait_frequency_tracking: 0.4
+    tracking_lin_vel_x: 0.45
+    tracking_lin_vel_y: 0.45
+    tracking_ang_vel: 0.25
+    gait_frequency_tracking: 0.35
     base_height: -4.0
     orientation: -5.0
     feet_distance: -2.0
     feet_slip: -0.12
     feet_swing: 1.1
     swing_clearance: 1.2
-    step_lateral_progress: 1.5
-    skate_penalty: -4.0
-    double_support_shuffle_penalty: -3.5
+    step_lateral_progress: 2.2
+    skate_penalty: -6.0
+    double_support_shuffle_penalty: -5.5
     stance_width_hard_penalty: -6.0
     turn_guard_penalty: -4.0
-    pass_progress_penalty: -1.5
+    pass_progress_penalty: 0.0
+    walk_away_penalty: -4.0
     wrong_surface_penalty: -5.0
-    action_smoothness: -0.08
+    interception_time_bonus: 3.2
+    ball_speed_reduction: 4.5
+    foot_ball_proximity: 0.8
+    ball_in_front_after_stop: 3.0
+    ball_travel_penalty: -1.6
+    action_smoothness: -0.12
     through_legs_penalty: -6.0
-    clear_miss_penalty: -2.0
+    clear_miss_penalty: -4.5
+    block_pose_ready: 1.5
+    support_foot_anchor: 1.2
+    block_commit_bonus: 1.0
+    ball_passed_unblocked_penalty: -6.0
+    orbit_after_commit_penalty: -3.5
   only_positive_rewards: false
   episode_length_s: 12.0
   terminate_height: 0.34
@@ -470,12 +523,26 @@ rewards:
   contact_speed_drop_threshold: 0.12
   contact_foot_radius: 0.18
   contact_ball_speed_threshold: 0.20
+  soft_contact_speed_drop_threshold: 0.05
+  soft_contact_foot_radius: 0.22
+  soft_contact_steps: 2
   contact_quality_speed_sigma: 0.05
   capture_speed_sigma: 0.15
+  interception_time_tau: 2.0
+  ball_speed_reduction_min_delta: 0.06
+  ball_speed_reduction_proximity_sigma: 0.10
+  foot_ball_proximity_sigma: 0.14
+  ball_in_front_lateral_sigma: 0.12
+  ball_in_front_dist_sigma: 0.30
+  ball_in_front_speed_sigma: 0.25
+  ball_reward_time_decay_tau: 3.0
+  ball_travel_penalty_max: 1.20
+  post_contact_speed_sample_time: 0.20
+  blocked_post_contact_speed_max: 0.25
   swing_clearance_target: 0.06
   swing_clearance_sigma: 0.0004
   step_lateral_target: 0.10
-  max_keeper_stance_width: 0.24
+  max_keeper_stance_width: 0.21
   stability_lin_sigma: 0.30
   stability_ang_sigma: 1.20
   swing_period: 0.20
