@@ -102,9 +102,10 @@ control:
   velocity_limit: {"Hip_Pitch": 8., "Hip_Roll": 12.9, "Hip_Yaw": 18., "Knee": 12.5, "Ankle": 18.} # [rad/s] - from IsaacLab K1 config
   action_scale: 1.
   decimation: 10
+  damping_velocity_filter_alpha: 0.22
 
 terrain:
-  type: "plane" # "plane" or "trimesh"
+  type: "trimesh" # "plane" or "trimesh"
   static_friction: 1.0  # [-]
   dynamic_friction: 1.0  # [-]
   restitution: 0.        # [-]
@@ -113,13 +114,18 @@ terrain:
   terrain_width: 10.
   border_size: 5.
   num_terrains: 8
-  terrain_proportions: [0.0, 0.0, 0.5, 0.5] # terrain types: [plane, slope, random, discrete]
+  terrain_proportions: [1.0, 0.0, 0.0, 0.0] # terrain types: [plane, slope, random, discrete]
   slope: 0.1
   random_height: 0.1
   discrete_height: 0.02
   horizontal_scale: 0.1
   vertical_scale: 0.005
   slope_threshold: 2.0
+  friction:
+    range: [0.2, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  patch_size: 10.0
 
 commands:
   num_commands: 3 # default: lin_vel_x, lin_vel_y, ang_vel_yaw

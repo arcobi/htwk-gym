@@ -89,6 +89,9 @@ class PassReceiveHighLevel(BallControlK1):
 
         self.actions = torch.zeros(self.num_envs, self.num_actions, dtype=torch.float, device=self.device)
         self.last_actions = torch.zeros_like(self.actions)
+        self.prev_dof_pos = torch.zeros_like(self.dof_pos)
+        self.custom_dof_vel = torch.zeros_like(self.dof_vel)
+        self.filtered_custom_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 0, 7:13])
         self.last_dof_targets = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
@@ -632,10 +635,13 @@ class PassReceiveHighLevel(BallControlK1):
         self._reset_dofs(env_ids)
         self._reset_root_states(env_ids)
         self.last_dof_targets[env_ids] = self.dof_pos[env_ids]
+        self.prev_dof_pos[env_ids] = self.dof_pos[env_ids]
         self.last_root_vel[env_ids] = self.root_states[env_ids, 0, 7:13]
         self.episode_length_buf[env_ids] = 0
         self.filtered_lin_vel[env_ids] = 0.0
         self.filtered_ang_vel[env_ids] = 0.0
+        self.custom_dof_vel[env_ids] = 0.0
+        self.filtered_custom_dof_vel[env_ids] = 0.0
         self.dof_vel_filtered[env_ids] = 0.0
         self.actions[env_ids] = 0.0
         self.last_actions[env_ids] = 0.0
@@ -1707,12 +1713,18 @@ class PassReceiveHighLevel(BallControlK1):
         )
         self.gait_frequency[:] = self.gait_frequency_offset + float(self.cfg["commands"]["gait_frequency_base"])
         joint_actions = self.actions[:, : self.num_dofs]
-        dof_targets = self.default_dof_pos + self.cfg["control"]["action_scale"] * joint_actions
+        dof_targets = torch.clamp(
+            self.default_dof_pos + self.cfg["control"]["action_scale"] * joint_actions,
+            min=self.dof_pos_limits[:, 0],
+            max=self.dof_pos_limits[:, 1],
+        )
+        damping_vel_alpha = float(self.cfg["control"].get("damping_velocity_filter_alpha", 0.22))
+        sim_dt = float(self.cfg["sim"]["dt"])
 
         self.torques.zero_()
         for i in range(self.cfg["control"]["decimation"]):
             self.last_dof_targets[self.delay_steps == i] = dof_targets[self.delay_steps == i]
-            dof_torques = self.dof_stiffness * (self.last_dof_targets - self.dof_pos) - self.dof_damping * self.dof_vel
+            dof_torques = self.dof_stiffness * (self.last_dof_targets - self.dof_pos) - self.dof_damping * self.filtered_custom_dof_vel
             friction = torch.min(self.dof_friction, dof_torques.abs()) * torch.sign(dof_torques)
             dof_torques = torch.clip(dof_torques - friction, min=-self.torque_limits, max=self.torque_limits)
             self.torques += dof_torques
@@ -1722,6 +1734,11 @@ class PassReceiveHighLevel(BallControlK1):
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
             self.gym.refresh_dof_force_tensor(self.sim)
+            self.custom_dof_vel[:] = (self.dof_pos - self.prev_dof_pos) / sim_dt
+            self.filtered_custom_dof_vel[:] = (
+                (1.0 - damping_vel_alpha) * self.filtered_custom_dof_vel + damping_vel_alpha * self.custom_dof_vel
+            )
+            self.prev_dof_pos[:] = self.dof_pos
         self.torques /= self.cfg["control"]["decimation"]
         self.render()
 

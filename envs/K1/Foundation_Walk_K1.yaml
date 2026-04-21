@@ -110,9 +110,10 @@ control:
   velocity_limit: {"Hip_Pitch": 8.0, "Hip_Roll": 12.9, "Hip_Yaw": 18.0, "Knee": 12.5, "Ankle": 18.0}
   action_scale: 1.0
   decimation: 10
+  damping_velocity_filter_alpha: 0.22
 
 terrain:
-  type: "plane"
+  type: "trimesh"
   static_friction: 1.0
   dynamic_friction: 1.0
   restitution: 0.0
@@ -120,13 +121,18 @@ terrain:
   terrain_width: 10.0
   border_size: 5.0
   num_terrains: 8
-  terrain_proportions: [0.0, 0.0, 0.5, 0.5]
+  terrain_proportions: [1.0, 0.0, 0.0, 0.0]
   slope: 0.1
   random_height: 0.1
   discrete_height: 0.02
   horizontal_scale: 0.1
   vertical_scale: 0.005
   slope_threshold: 2.0
+  friction:
+    range: [0.2, 2.0]
+    operation: "additive"
+    distribution: "uniform"
+  patch_size: 10.0
 
 commands:
   num_core_commands: 4
@@ -374,7 +380,7 @@ rewards:
     dof_vel: -0.0005
     dof_acc: -0.0000001
     root_acc: -0.0002
-    action_rate: -0.01
+    action_rate: -0.12
     dof_pos_limits: -2.0
     dof_vel_limits: -0.5
     torque_limits: -0.5

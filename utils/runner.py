@@ -26,6 +26,41 @@ import importlib
 import inspect
 import pkgutil
 
+
+def merge_dicts(base, override):
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def load_config(cfg_file, visited=None):
+    if visited is None:
+        visited = set()
+
+    cfg_file = os.path.normpath(cfg_file)
+    if cfg_file in visited:
+        raise ValueError(f"Recursive config inheritance detected for {cfg_file}")
+    visited.add(cfg_file)
+
+    with open(cfg_file, "r", encoding="utf-8") as f:
+        cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+
+    parent = cfg.pop("extends", None)
+    if not parent:
+        return cfg
+
+    if not parent.endswith(".yaml"):
+        parent = os.path.join("envs", f"{parent}.yaml")
+    elif not os.path.isabs(parent):
+        parent = os.path.join(os.path.dirname(cfg_file), parent)
+
+    parent_cfg = load_config(parent, visited)
+    return merge_dicts(parent_cfg, cfg)
+
 def get_task_class(task_name):
     """
     Dynamically load task class by name.
@@ -193,8 +228,7 @@ class Runner:
     # Override config file with args if needed
     def _update_cfg_from_args(self):
         cfg_file = os.path.join("envs", "{}.yaml".format(self.args.task))
-        with open(cfg_file, "r", encoding="utf-8") as f:
-            self.cfg = yaml.load(f.read(), Loader=yaml.FullLoader)
+        self.cfg = load_config(cfg_file)
         # Ensure default model if not present in config
         if "model" not in self.cfg.get("basic", {}):
             self.cfg.setdefault("basic", {})["model"] = "BaseActorCritic"
@@ -202,6 +236,8 @@ class Runner:
             if getattr(self.args, arg) is not None:
                 if arg == "num_envs":
                     self.cfg["env"][arg] = getattr(self.args, arg)
+                elif arg == "task":
+                    continue
                 else:
                     self.cfg["basic"][arg] = getattr(self.args, arg)
         if self.args.record_video_mode:

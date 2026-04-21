@@ -1,0 +1,16 @@
+extends: "K1/Pass_Receive_High_Level"
+
+basic:
+  checkpoint: -1
+  max_iterations: 5000
+  description: "Fine-tuning stage for Pass_Receive_High_Level from a working checkpoint."
+
+env:
+  num_envs: 4096
+
+algorithm:
+  learning_rate: 2.5e-6
+  desired_kl: 0.01
+  entropy_coef: -0.005
+  min_entropy: -20
+  max_entropy: -7.0

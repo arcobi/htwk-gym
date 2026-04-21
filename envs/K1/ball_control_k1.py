@@ -338,6 +338,9 @@ class BallControlK1(BaseTask):
         self.gravity_vec = to_torch(get_axis_params(-1.0, self.up_axis_idx), device=self.device).repeat((self.num_envs, 1))
         self.actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
         self.last_actions = torch.zeros(self.num_envs, self.num_actions - 1, dtype=torch.float, device=self.device)
+        self.prev_dof_pos = torch.zeros_like(self.dof_pos)
+        self.custom_dof_vel = torch.zeros_like(self.dof_vel)
+        self.filtered_custom_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_dof_vel = torch.zeros_like(self.dof_vel)
         self.last_root_vel = torch.zeros_like(self.root_states[:, 0, 7:13])
         self.last_dof_targets = torch.zeros(self.num_envs, self.num_dofs, dtype=torch.float, device=self.device)
@@ -602,10 +605,13 @@ class BallControlK1(BaseTask):
         )
 
         self.last_dof_targets[env_ids] = self.dof_pos[env_ids]
+        self.prev_dof_pos[env_ids] = self.dof_pos[env_ids]
         self.last_root_vel[env_ids] = self.root_states[env_ids, 0, 7:13]
         self.episode_length_buf[env_ids] = 0
         self.filtered_lin_vel[env_ids] = 0.0
         self.filtered_ang_vel[env_ids] = 0.0
+        self.custom_dof_vel[env_ids] = 0.0
+        self.filtered_custom_dof_vel[env_ids] = 0.0
         self.cmd_resample_time[env_ids] = 0
         self.last_ball_lin_vel_world[env_ids] = 0.0  # Reset ball velocity tracking
         self.last_relative_ball_pos[env_ids] = 0.0  # Reset last ball position buffer
@@ -759,6 +765,9 @@ class BallControlK1(BaseTask):
     def _reset_dofs(self, env_ids):
         self.dof_pos[env_ids] = apply_randomization(self.default_dof_pos, self.cfg["randomization"].get("init_dof_pos"))
         self.dof_vel[env_ids] = 0.0
+        self.prev_dof_pos[env_ids] = self.dof_pos[env_ids]
+        self.custom_dof_vel[env_ids] = 0.0
+        self.filtered_custom_dof_vel[env_ids] = 0.0
         # Multiply by 2 because there are 2 actors per environment (robot and ball)
         # This ensures we only update the robot actor's DOFs
         env_ids_int32 = (2 * env_ids).to(dtype=torch.int32)
@@ -1048,13 +1057,19 @@ class BallControlK1(BaseTask):
         self.gait_frequency[:] = self.gait_frequency_offset + 2.0
         actions = actions[:, :12]
         self.actions[:] = torch.clip(actions, -self.cfg["normalization"]["clip_actions"], self.cfg["normalization"]["clip_actions"])
-        dof_targets = self.default_dof_pos + self.cfg["control"]["action_scale"] * self.actions
+        dof_targets = torch.clip(
+            self.default_dof_pos + self.cfg["control"]["action_scale"] * self.actions,
+            min=self.dof_pos_limits[:, 0],
+            max=self.dof_pos_limits[:, 1],
+        )
+        damping_vel_alpha = float(self.cfg["control"].get("damping_velocity_filter_alpha", 0.22))
+        sim_dt = float(self.cfg["sim"]["dt"])
 
         # perform physics step
         self.torques.zero_()
         for i in range(self.cfg["control"]["decimation"]):
             self.last_dof_targets[self.delay_steps == i] = dof_targets[self.delay_steps == i]
-            dof_torques = self.dof_stiffness * (self.last_dof_targets - self.dof_pos) - self.dof_damping * self.dof_vel
+            dof_torques = self.dof_stiffness * (self.last_dof_targets - self.dof_pos) - self.dof_damping * self.filtered_custom_dof_vel
             friction = torch.min(self.dof_friction, dof_torques.abs()) * torch.sign(dof_torques)
             dof_torques = torch.clip(dof_torques - friction, min=-self.torque_limits, max=self.torque_limits)
             self.torques += dof_torques
@@ -1064,6 +1079,11 @@ class BallControlK1(BaseTask):
                 self.gym.fetch_results(self.sim, True)
             self.gym.refresh_dof_state_tensor(self.sim)
             self.gym.refresh_dof_force_tensor(self.sim)
+            self.custom_dof_vel[:] = (self.dof_pos - self.prev_dof_pos) / sim_dt
+            self.filtered_custom_dof_vel[:] = (
+                (1.0 - damping_vel_alpha) * self.filtered_custom_dof_vel + damping_vel_alpha * self.custom_dof_vel
+            )
+            self.prev_dof_pos[:] = self.dof_pos
         self.torques /= self.cfg["control"]["decimation"]
         self.render()
 
