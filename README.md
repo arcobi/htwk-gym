@@ -93,11 +93,8 @@ HTWK Gym supports multiple humanoid robot platforms with specialized task config
 - **Use Case**: K1-specific locomotion and gait control
 - **Configuration**: `envs/K1/Parameter_Walk.yaml`
 
-## Installation
+## Installation (updated)
 
-### Isaac Sim 5 / Isaac Lab path
-
-This fork adds an Isaac Lab task path for Isaac Sim 5. It does not require reinstalling Isaac Sim. Set `ISAACLAB_ROOT` to your Isaac Lab checkout. If `ISAACLAB_ROOT` is unset, the helper scripts look for a sibling `../IsaacLab` checkout next to this repository.
 
 ```sh
 export ISAACLAB_ROOT=/path/to/IsaacLab
