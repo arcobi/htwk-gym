@@ -1,5 +1,7 @@
 # HTWK Gym
 
+Fork of [NaoHTWK/htwk-gym](https://github.com/NaoHTWK/htwk-gym), rewritten for Isaac Sim 5 / Isaac Lab support.
+
 HTWK Gym is an advanced reinforcement learning (RL) framework for humanoid robot locomotion, developed by [HTWK Robots](https://robots.htwk-leipzig.de/startseite). Built upon the foundation of [Booster Gym](https://github.com/BoosterRobotics/booster_gym/tree/main), HTWK Gym extends the original framework with significant enhancements for multi-robot support, advanced locomotion tasks, and improved research capabilities.
 
 [![parameter_walk_on_real_T1](https://github.com/NaoHTWK/htwk-gym/blob/main/htwk_walk01.gif?raw=true)](https://github.com/NaoHTWK/htwk-gym/blob/main/htwk_walk01.gif?raw=true)
@@ -92,6 +94,55 @@ HTWK Gym supports multiple humanoid robot platforms with specialized task config
 - **Configuration**: `envs/K1/Parameter_Walk.yaml`
 
 ## Installation
+
+### Isaac Sim 5 / Isaac Lab path
+
+This fork adds an Isaac Lab task path for Isaac Sim 5. It does not require reinstalling Isaac Sim. Set `ISAACLAB_ROOT` to your Isaac Lab checkout. If `ISAACLAB_ROOT` is unset, the helper scripts look for a sibling `../IsaacLab` checkout next to this repository.
+
+```sh
+export ISAACLAB_ROOT=/path/to/IsaacLab
+```
+
+Convert the K1 URDF once:
+
+```sh
+./scripts/isaaclab_convert_assets.sh
+```
+
+Run a one-iteration headless smoke:
+
+```sh
+${ISAACLAB_ROOT}/isaaclab.sh -p scripts/isaaclab_train.py \
+  --headless \
+  --task HTWK-K1-ParameterWalk-Direct-v0 \
+  --num_envs 1 \
+  --max_iterations 1 \
+  --device cpu
+```
+
+Start K1 parameter-walk training on the Isaac Lab task:
+
+```sh
+${ISAACLAB_ROOT}/isaaclab.sh -p scripts/isaaclab_train.py \
+  --headless \
+  --task HTWK-K1-ParameterWalk-Direct-v0 \
+  --num_envs 4096 \
+  --device cuda:0
+```
+
+Play a trained checkpoint after training has produced `logs/rsl_rl/htwk_k1_parameter_walk/.../model_*.pt`:
+
+```sh
+${ISAACLAB_ROOT}/isaaclab.sh -p scripts/isaaclab_play.py \
+  --task HTWK-K1-ParameterWalk-Direct-Play-v0 \
+  --num_envs 1 \
+  --checkpoint logs/rsl_rl/htwk_k1_parameter_walk/<run>/model_<iteration>.pt \
+  --device cuda:0
+```
+
+The original Isaac Gym entrypoints are still present below for legacy runs.
+
+### Legacy Isaac Gym path
 
 HTWK Gym uses Python virtual environments for flexible dependency management. Follow these steps to set up your environment:
 

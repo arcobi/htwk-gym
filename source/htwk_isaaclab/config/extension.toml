@@ -1,0 +1,21 @@
+[package]
+version = "0.1.0"
+title = "HTWK Isaac Lab Tasks"
+description = "Isaac Lab task registrations for HTWK Gym assets."
+readme = "README.md"
+repository = ""
+category = "robotics"
+keywords = ["robotics", "rl", "isaaclab", "htwk", "booster"]
+author = "HTWK Gym"
+maintainer = "HTWK Gym"
+
+[dependencies]
+"isaaclab" = {}
+"isaaclab_assets" = {}
+"isaaclab_rl" = {}
+
+[core]
+reloadable = false
+
+[[python.module]]
+name = "htwk_isaaclab"
